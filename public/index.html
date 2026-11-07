@@ -65,7 +65,7 @@
             Same song.<br>Same second.<br><span style="color: var(--lime)">Any distance.</span>
           </h1>
           <p style="margin: 0; font-size: 16px; line-height: 1.5; color: var(--text-secondary); max-width: 440px">
-            Spin up a room, share the code, and everyone hears the same track at the same moment. Queue it up, react, talk over it.
+            Real-time synchronized listening with zero audio lag. Spin up a room, share the code, and enjoy tracks together.
           </p>
           <div style="display: flex; align-items: center; gap: 12px; color: var(--text-muted); font-size: 14px">
             <div style="display: flex">
@@ -73,7 +73,7 @@
               <span style="width: 28px; height: 28px; border-radius: 50%; background: var(--sky); border: 2px solid #0A0A0D; margin-left: -8px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #0A0A0D">P</span>
               <span style="width: 28px; height: 28px; border-radius: 50%; background: var(--sun); border: 2px solid #0A0A0D; margin-left: -8px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #0A0A0D">M</span>
             </div>
-            No account or Spotify subscription needed
+            No account or subscription required
           </div>
         </div>
 
@@ -147,7 +147,7 @@
         <div id="room-badge" style="display: flex; align-items: center; gap: 8px; background: rgba(10,10,13,0.7); border: 1px solid var(--border-ctrl); border-radius: 999px; padding: 6px 14px; flex-shrink: 0">
           <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 10px var(--lime)"></span>
           <span class="mono data-on-load" style="color: var(--text-main); letter-spacing: 0.08em; font-weight: 700; font-size: 13px" id="room-code-display"></span>
-          <span id="listening-count-display" class="data-on-load" style="font-size: 12px; color: var(--text-muted); margin-left: 2px">1 here</span>
+          <span id="listening-count-display" class="data-on-load" style="font-size: 12px; color: var(--text-muted); margin-left: 2px"></span>
           <!-- Skeleton Shimmer for Badge during refresh -->
           <span class="skeleton-box skeleton-on-load" style="width: 65px; height: 14px; border-radius: 4px; display: none"></span>
           <button id="copy-room-link-btn" class="ghost" title="Copy Invite Link" style="width: 24px; height: 24px; border-radius: 50%; border: 0; background: transparent; color: var(--text-main); display: flex; align-items: center; justify-content: center">
@@ -206,16 +206,16 @@
               <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px">
                 <div style="display: flex; align-items: center; gap: 8px">
                   <span style="font-size: 10px; font-weight: 700; letter-spacing: 0.12em; color: var(--lime); text-transform: uppercase" id="player-status-badge">
-                    READY TO PLAY
+                    ROOM READY
                   </span>
                   <div id="added-by-badge" style="display: none; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted)">
                     <span id="added-by-avatar" class="av" style="background: var(--coral); width: 16px; height: 16px; font-size: 9px">A</span>
-                    <span id="added-by-text">added by host</span>
+                    <span id="added-by-text"></span>
                   </div>
                 </div>
 
                 <h1 id="track-title" style="margin: 0; font-size: 17px; line-height: 1.25; letter-spacing: -0.02em; font-weight: 700; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word">
-                  Nothing playing yet
+                  No track playing
                 </h1>
 
                 <p id="track-artist" style="margin: 0; font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis"></p>
@@ -351,8 +351,8 @@
         <div id="queue-list" class="data-on-load" style="display: flex; flex-direction: column; gap: 4px; overflow-y: auto; flex: 1; min-height: 0">
           <div style="padding: 24px 0; text-align: center; color: var(--text-muted); font-size: 13px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; height: 100%">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.35"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-            <div>Queue is currently empty</div>
-            <div style="font-size: 12px; color: var(--text-muted); opacity: 0.8">Search songs to queue tracks</div>
+            <div style="font-weight: 500; color: var(--text-secondary)">No tracks queued up</div>
+            <div style="font-size: 12px; color: var(--text-muted)">Search songs below to keep the music going</div>
           </div>
         </div>
       </section>
@@ -362,7 +362,7 @@
         <!-- Active Search Input Box -->
         <div style="display: flex; align-items: center; gap: 12px; height: 50px; padding: 0 16px; border-radius: 14px; background: var(--input-bg); border: 1px solid var(--border-ctrl)">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-          <input id="inline-search-input" aria-label="Search songs or paste a YouTube link" placeholder="Search any song, artist, album, remix or paste YouTube URL..." style="flex: 1; min-width: 0; height: 100%; background: transparent; border: 0; outline: none; color: var(--text-main); font-size: 14px">
+          <input id="inline-search-input" aria-label="Search songs or paste a YouTube link" placeholder="Search songs or paste YouTube link..." style="flex: 1; min-width: 0; height: 100%; background: transparent; border: 0; outline: none; color: var(--text-main); font-size: 14px">
           <span id="search-spinner" class="hidden" style="color: var(--lime); font-size: 12px">Searching...</span>
           <span class="mono" style="border: 1px solid var(--border-outline); border-radius: 6px; padding: 2px 7px; font-size: 11px; color: var(--text-muted)">/</span>
         </div>
@@ -376,8 +376,8 @@
         <!-- Clean Initial Search Prompt (Shown when search is empty) -->
         <div id="search-empty-prompt" style="padding: 24px 16px; text-align: center; color: var(--text-muted); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; flex: 1">
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.35"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-          <div style="font-size: 13px; font-weight: 500; color: var(--text-secondary)">Type any artist or track name above</div>
-          <div style="font-size: 12px; color: var(--text-muted)">Instant sub-second results will appear here</div>
+          <div style="font-size: 13px; font-weight: 500; color: var(--text-secondary)">Search any song or artist</div>
+          <div style="font-size: 12px; color: var(--text-muted)">Tap a track to play now or add it to queue</div>
         </div>
       </section>
 

@@ -1044,7 +1044,7 @@ function renderRoomState(room) {
   // Listening count
   if (listeningCountDisplay) {
     const count = room.users.length;
-    listeningCountDisplay.textContent = `${count} here`;
+    listeningCountDisplay.textContent = count === 1 ? '1 listening' : `${count} listening`;
   }
 
   // User Avatars Strip
@@ -1079,7 +1079,7 @@ function renderRoomState(room) {
   if (room.queue.length === 0) {
     queueList.innerHTML = `
       <div style="padding: 24px 0; text-align: center; color: var(--text-muted); font-size: 13px">
-        Queue is empty. Search songs to queue tracks!
+        No tracks queued up. Search songs below to add!
       </div>
     `;
   } else {
@@ -1156,11 +1156,11 @@ function renderRoomState(room) {
     pauseIcon?.classList.add('hidden');
     emptyHeroArt.style.display = 'flex';
     trackArt.style.display = 'none';
-    trackTitle.textContent = 'Nothing playing yet';
+    trackTitle.textContent = 'No track playing';
     trackArtist.textContent = '';
     totalDurationDisplay.textContent = '0:00';
     currentTimeDisplay.textContent = '0:00';
-    playerStatusBadge.textContent = 'READY TO PLAY';
+    playerStatusBadge.textContent = 'ROOM READY';
     if (addedByBadge) addedByBadge.style.display = 'none';
     updateWaveformProgress(0);
   }
