@@ -352,9 +352,23 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Realtime Live Reactions (Floating emoji bursts)
+  // Realtime Live Reactions with rate limiting (max 5 per 2 seconds per socket)
+  const reactionTimestamps = [];
   socket.on('send-reaction', ({ emoji }) => {
     if (!currentRoomId) return;
+
+    const now = Date.now();
+    // Keep only timestamps from the last 2000ms
+    while (reactionTimestamps.length > 0 && reactionTimestamps[0] <= now - 2000) {
+      reactionTimestamps.shift();
+    }
+
+    if (reactionTimestamps.length >= 5) {
+      // Exceeded burst limit, silently drop to protect room
+      return;
+    }
+    reactionTimestamps.push(now);
+
     const room = rooms.getRoom(currentRoomId);
     const user = room?.users.get(socket.id);
     io.to(currentRoomId).emit('reaction-received', {

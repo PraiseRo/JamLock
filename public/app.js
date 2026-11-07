@@ -1054,9 +1054,27 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// --- 9. REACTIONS & COUNTER BADGES ---
+// --- 9. REACTIONS & COUNTER BADGES (Burst Rate Limited) ---
+let localReactionBurstCount = 0;
+let reactionCooldownTimer = null;
+
 document.querySelectorAll('.reaction-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
+    if (localReactionBurstCount >= 5) {
+      // Temporarily throttle clicks
+      btn.style.transform = 'scale(0.9)';
+      setTimeout(() => { btn.style.transform = ''; }, 150);
+      return;
+    }
+
+    localReactionBurstCount++;
+    if (!reactionCooldownTimer) {
+      reactionCooldownTimer = setTimeout(() => {
+        localReactionBurstCount = 0;
+        reactionCooldownTimer = null;
+      }, 2000);
+    }
+
     const emoji = btn.dataset.emoji;
     socket.emit('send-reaction', { emoji });
   });
@@ -1118,9 +1136,6 @@ socket.on('reaction-received', (data) => {
       }
     }
   }
-
-  // Post reaction notice into chat
-  appendReactionChat(data.username, data.emoji);
 });
 
 let activeMobileTabName = 'queue';
