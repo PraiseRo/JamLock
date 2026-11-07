@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { rooms } from './rooms.js';
 import { searchSongs, getRecommendations } from './search.js';
+import { resolveAudioStream } from './audioResolver.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -122,6 +123,25 @@ app.get('/api/room/:roomId', (req, res) => {
     return res.status(404).json({ error: 'Room not found' });
   }
   return res.json(rooms.serializeRoom(room));
+});
+
+// API: Direct Audio Stream Resolver for Mobile Background Playback (with YT IFrame fallback)
+app.get('/api/stream-source', async (req, res) => {
+  try {
+    const videoId = String(req.query.id || '').trim();
+    const title = String(req.query.title || '').trim();
+    const artist = String(req.query.artist || '').trim();
+    const durationSeconds = Number(req.query.duration) || 0;
+
+    if (!videoId && !title) {
+      return res.json({ mode: 'iframe', url: null, source: 'missing-params' });
+    }
+
+    const result = await resolveAudioStream({ videoId, title, artist, durationSeconds });
+    return res.json(result);
+  } catch (e) {
+    return res.json({ mode: 'iframe', url: null, source: 'error-fallback' });
+  }
 });
 
 // WebSocket Connection Handlers
