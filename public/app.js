@@ -419,7 +419,7 @@ createRoomBtn?.addEventListener('click', () => {
   const username = requireValidUsername();
   if (!username) return;
   const generatedCode = generateRoomCode();
-  joinRoom(generatedCode, username);
+  joinRoom(generatedCode, username, true);
 });
 
 joinCodeInput?.addEventListener('input', (e) => {
@@ -441,7 +441,7 @@ joinRoomBtn?.addEventListener('click', () => {
     joinCodeInput?.focus();
     return;
   }
-  joinRoom(code, username);
+  joinRoom(code, username, false);
 });
 
 function getBrowserClientId() {
@@ -453,7 +453,7 @@ function getBrowserClientId() {
   return cid;
 }
 
-function joinRoom(roomId, explicitUsername) {
+function joinRoom(roomId, explicitUsername, isCreating = false) {
   const username = explicitUsername || usernameInput?.value.trim();
   if (!username) {
     requireValidUsername();
@@ -463,7 +463,7 @@ function joinRoom(roomId, explicitUsername) {
 
   const clientId = getBrowserClientId();
 
-  socket.emit('join-room', { roomId, username, clientId }, (response) => {
+  socket.emit('join-room', { roomId, username, clientId, isCreating }, (response) => {
     if (response?.success) {
       currentUser = response.user;
       currentRoom = response.room;
@@ -485,7 +485,13 @@ function joinRoom(roomId, explicitUsername) {
       showToast(`Connected to room ${roomId}`, 'success');
     } else if (response?.error) {
       document.documentElement.classList.remove('in-room-loading');
+      localStorage.removeItem('jamlock_current_room');
+      localStorage.removeItem('beatsync_current_room');
+      if (window.location.search) {
+        window.history.replaceState({}, '', window.location.pathname);
+      }
       showToast(response.error, 'error');
+      joinCodeInput?.focus();
     }
   });
 }
@@ -1666,7 +1672,9 @@ function showToast(message, type = 'info') {
   const container = document.getElementById('toast-container');
   if (!container) return;
   const toast = document.createElement('div');
-  const bgBorder = type === 'success' ? 'border: 1px solid var(--lime); color: var(--lime)' : 'border: 1px solid var(--border-outline); color: var(--text-main)';
+  const bgBorder = type === 'success' 
+    ? 'border: 1px solid var(--lime); color: var(--lime)' 
+    : (type === 'error' ? 'border: 1px solid #f43f5e; color: #f43f5e' : 'border: 1px solid var(--border-outline); color: var(--text-main)');
   toast.style.cssText = `padding: 10px 16px; border-radius: 12px; background: rgba(19,19,24,0.95); backdrop-filter: blur(8px); ${bgBorder}; font-size: 13px; font-weight: 500; box-shadow: 0 10px 30px rgba(0,0,0,0.5); pointer-events: auto; animation: scaleUp 0.2s ease`;
   toast.textContent = message;
   container.appendChild(toast);

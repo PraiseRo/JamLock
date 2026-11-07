@@ -159,8 +159,11 @@ io.on('connection', (socket) => {
   });
 
   // Join or Create Room
-  socket.on('join-room', ({ roomId, username, clientId }, callback) => {
-    if (!roomId) return;
+  socket.on('join-room', ({ roomId, username, clientId, isCreating }, callback) => {
+    if (!roomId) {
+      if (callback) callback({ success: false, error: 'Room code is required' });
+      return;
+    }
     const cleanUsername = (username || '').trim().slice(0, 25);
     if (!cleanUsername) {
       if (callback) {
@@ -170,6 +173,23 @@ io.on('connection', (socket) => {
     }
 
     const cleanId = roomId.trim().toUpperCase();
+
+    // Validate format (alphanumeric and dashes, 3-20 chars)
+    if (!/^[A-Z0-9\-]{3,20}$/.test(cleanId)) {
+      if (callback) {
+        callback({ success: false, error: 'Invalid room code format' });
+      }
+      return;
+    }
+
+    // Verify room existence if joining an existing room
+    if (!isCreating && !rooms.hasRoom(cleanId)) {
+      if (callback) {
+        callback({ success: false, error: `Room "${cleanId}" does not exist. Check the code or create a new room.` });
+      }
+      return;
+    }
+
     currentRoomId = cleanId;
 
     socket.join(cleanId);

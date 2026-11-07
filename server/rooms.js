@@ -35,6 +35,11 @@ class RoomManager {
     return this.rooms.get(roomId.trim().toUpperCase());
   }
 
+  hasRoom(roomId) {
+    if (!roomId) return false;
+    return this.rooms.has(roomId.trim().toUpperCase());
+  }
+
   addUser(roomId, socketId, username, clientId) {
     const room = this.getOrCreateRoom(roomId);
     const resolvedClientId = clientId || socketId;
