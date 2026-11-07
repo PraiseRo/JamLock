@@ -350,18 +350,10 @@ button:focus-visible, input:focus-visible {
   background: var(--lime);
 }
 
-/* Subtle organic pulse when playing */
-@keyframes waveSubtlePulse {
-  0%, 100% {
-    filter: drop-shadow(0 0 4px rgba(200, 255, 61, 0.5));
-  }
-  50% {
-    filter: drop-shadow(0 0 8px rgba(200, 255, 61, 0.85));
-  }
-}
-
+/* Playing state uses a static glow: an animated drop-shadow filter repaints
+   every frame and causes jank on phones. */
 .wavy-progress-container.is-playing .wave-active-path {
-  animation: waveSubtlePulse 2.5s infinite ease-in-out;
+  filter: drop-shadow(0 0 7px rgba(200, 255, 61, 0.8));
 }
 
 /* Hardware Accelerated 3D Floating Reaction Animation */

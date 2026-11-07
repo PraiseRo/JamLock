@@ -128,6 +128,11 @@ app.get('/api/room/:roomId', (req, res) => {
 io.on('connection', (socket) => {
   let currentRoomId = null;
 
+  // Clock sync: client measures RTT against this to compute an accurate offset
+  socket.on('time-ping', (cb) => {
+    if (typeof cb === 'function') cb({ serverTime: Date.now() });
+  });
+
   // Join or Create Room
   socket.on('join-room', ({ roomId, username, clientId }, callback) => {
     if (!roomId) return;

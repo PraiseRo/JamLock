@@ -32,11 +32,45 @@ let lastPlaybackKey = '';       // trackId:isPlaying last applied from room-stat
 let lastPlayKick = 0;           // throttle for retrying playVideo()
 let notPlayingSince = 0;        // when the player first failed to play while room is playing
 
+let clockSynced = false;         // true once a measured (RTT-compensated) offset exists
+let lastRtt = 0;                 // RTT of the best clock-sync sample (debug)
+
+// Rough one-sample offset. Only used until the measured sync below completes,
+// because a single message sample ignores network latency and is very jittery.
 function updateClockOffset(serverTime) {
+  if (clockSynced) return;
   if (typeof serverTime === 'number' && !isNaN(serverTime)) {
     clockOffset = serverTime - Date.now();
   }
 }
+
+// NTP-style clock sync: several pings, keep the lowest-RTT sample (least noisy)
+function syncClock() {
+  if (!socket.connected) return;
+  const samples = [];
+  let sent = 0;
+  const sendOne = () => {
+    const t0 = Date.now();
+    socket.emit('time-ping', (res) => {
+      const t1 = Date.now();
+      if (res && typeof res.serverTime === 'number') {
+        const rtt = t1 - t0;
+        samples.push({ rtt, offset: res.serverTime + rtt / 2 - t1 });
+      }
+      if (++sent < 8) {
+        setTimeout(sendOne, 120);
+      } else if (samples.length) {
+        const best = samples.reduce((a, b) => (b.rtt < a.rtt ? b : a));
+        clockOffset = best.offset;
+        lastRtt = best.rtt;
+        clockSynced = true;
+      }
+    });
+  };
+  sendOne();
+}
+socket.on('connect', syncClock);
+setInterval(syncClock, 30000);
 
 // Reaction Counts State
 const reactionCounts = {
@@ -486,6 +520,26 @@ saveSettingsBtn?.addEventListener('click', () => {
 });
 
 // --- 6. SYNCHRONIZATION & DRIFT ENGINE ---
+const DRIFT_HARD_SEEK_SEC = 0.4;   // only seek when this far off
+const DRIFT_SETTLE_SEC = 0.25;     // tighter check right after a track starts
+const SEEK_COOLDOWN_MS = 2500;     // never seek more often than this (prevents seek storms)
+let lastSeekAt = 0;
+let seekIssuedAt = 0;
+let seekLagSec = 0.25;             // measured delay between seekTo() and audio resuming
+let settlePending = false;         // one corrective check after a new track starts playing
+const recentSeeks = [];
+
+// Single place that seeks for drift correction. Compensates for seek latency.
+function driftSeek(targetSec, force = false) {
+  const now = Date.now();
+  if (!force && now - lastSeekAt < SEEK_COOLDOWN_MS) return false;
+  lastSeekAt = now;
+  seekIssuedAt = now;
+  recentSeeks.push(now);
+  try { ytPlayer.seekTo(Math.max(0, targetSec + seekLagSec), true); } catch (e) {}
+  return true;
+}
+
 window.onYouTubeIframeAPIReady = () => {
   ytPlayer = new YT.Player('yt-player', {
     height: '100%',
@@ -526,6 +580,22 @@ window.onYouTubeIframeAPIReady = () => {
             }
           } catch (e) {}
           showAudioPrompt(false);
+
+          // Learn how long seeks take to resume audio on this device
+          if (seekIssuedAt) {
+            const lag = (Date.now() - seekIssuedAt) / 1000;
+            seekLagSec = Math.max(0.05, Math.min(1.0, seekLagSec * 0.5 + lag * 0.5));
+            seekIssuedAt = 0;
+          }
+
+          // First PLAYING after a track load: one corrective alignment, no seek loops
+          if (settlePending && currentRoom?.playback?.isPlaying) {
+            settlePending = false;
+            try {
+              const drift = ytPlayer.getCurrentTime() - calculateServerPosition();
+              if (Math.abs(drift) > DRIFT_SETTLE_SEC) driftSeek(calculateServerPosition(), true);
+            } catch (e) {}
+          }
         } else if (event.data === YT.PlayerState.ENDED) {
           // Server timer is authoritative; this is a fallback for tracks with unknown duration
           if (currentUser?.isHost && currentRoom?.currentTrack) {
@@ -556,7 +626,8 @@ function startSyncEngine() {
 
         if (roomPlaying) {
           if (state === YT.PlayerState.PLAYING) {
-            if (Math.abs(local - effectiveTime) > 1.25) ytPlayer.seekTo(effectiveTime, true);
+            // Cooldown + tight threshold; never seek while buffering/loading
+            if (Math.abs(local - effectiveTime) > DRIFT_HARD_SEEK_SEC) driftSeek(effectiveTime);
           } else if (!isActive && Date.now() - lastPlayKick > 3000) {
             lastPlayKick = Date.now();
             ytPlayer.playVideo();
@@ -580,6 +651,7 @@ function startSyncEngine() {
     effectiveTime = Math.max(0, Math.min(effectiveTime, duration));
     currentTimeDisplay.textContent = formatTime(effectiveTime);
     updateWaveformProgress((effectiveTime / duration) * 100);
+    updateDebugOverlay();
   };
 
   syncInterval = setInterval(runSyncTick, 400);
@@ -616,6 +688,8 @@ function loadCurrentTrack(room) {
   const trackId = room.currentTrack.id;
   if (loadedTrackId === trackId) return;
   loadedTrackId = trackId;
+  settlePending = true;
+  lastSeekAt = Date.now(); // no drift seeks while the new video is still loading
 
   try {
     const startSec = calculateServerPosition();
@@ -667,7 +741,8 @@ function showAudioPrompt(show) {
   el.style.display = 'block';
 }
 
-// Any first user gesture can unlock playback and un-mute if the room is playing
+// Any first user gesture can unlock playback and un-mute if the room is playing.
+// Never seeks: seeking on taps interrupts loading (skips on phones).
 const unlockAudioOnGesture = () => {
   if (!ytReady || !ytPlayer) return;
   try {
@@ -677,8 +752,9 @@ const unlockAudioOnGesture = () => {
     }
     if (currentRoom?.currentTrack && currentRoom.playback?.isPlaying) {
       const state = ytPlayer.getPlayerState();
-      if (state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING) {
-        ytPlayer.seekTo(calculateServerPosition(), true);
+      const settled = state === YT.PlayerState.PAUSED || state === YT.PlayerState.CUED || state === YT.PlayerState.UNSTARTED || state === -1;
+      if (settled && Date.now() - lastPlayKick > 1500) {
+        lastPlayKick = Date.now();
         ytPlayer.playVideo();
       }
     }
@@ -686,6 +762,28 @@ const unlockAudioOnGesture = () => {
 };
 document.addEventListener('pointerdown', unlockAudioOnGesture, { passive: true });
 document.addEventListener('keydown', unlockAudioOnGesture, { passive: true });
+
+// Optional ?debug=1 overlay to verify sync on real devices
+const SYNC_DEBUG = new URLSearchParams(window.location.search).get('debug') === '1';
+let debugEl = null;
+function updateDebugOverlay() {
+  if (!SYNC_DEBUG) return;
+  if (!debugEl) {
+    debugEl = document.createElement('div');
+    debugEl.style.cssText = 'position: fixed; left: 8px; bottom: 8px; z-index: 99999; padding: 6px 10px; border-radius: 8px; background: rgba(0,0,0,0.8); color: #C8FF3D; font: 11px/1.4 "JetBrains Mono", monospace; pointer-events: none; white-space: pre';
+    document.body.appendChild(debugEl);
+  }
+  try {
+    const now = Date.now();
+    while (recentSeeks.length && now - recentSeeks[0] > 60000) recentSeeks.shift();
+    const local = ytPlayer?.getCurrentTime?.() || 0;
+    const drift = local - calculateServerPosition();
+    debugEl.textContent =
+      `offset ${Math.round(clockOffset)}ms${clockSynced ? '' : ' (rough)'}  rtt ${lastRtt}ms\n` +
+      `drift ${(drift * 1000).toFixed(0)}ms  state ${ytPlayer?.getPlayerState?.()}\n` +
+      `seeks/min ${recentSeeks.length}  seekLag ${(seekLagSec * 1000).toFixed(0)}ms`;
+  } catch (e) {}
+}
 
 function applyRoomPlayback(playback) {
   if (!playback) return;
@@ -707,17 +805,25 @@ function applyRoomPlayback(playback) {
   try {
     if (playback.isPlaying) {
       const state = typeof ytPlayer.getPlayerState === 'function' ? ytPlayer.getPlayerState() : -1;
-      if (state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING) {
-        ytPlayer.seekTo(serverPos, true);
-        const playPromise = ytPlayer.playVideo();
-        // If playVideo returns a promise, catch unhandled autoplay rejections
-        if (playPromise && typeof playPromise.catch === 'function') {
-          playPromise.catch((e) => console.warn('Autoplay blocked:', e));
+      if (state === YT.PlayerState.PLAYING || state === YT.PlayerState.BUFFERING) {
+        // Already running: only correct real drift, with cooldown
+        if (state === YT.PlayerState.PLAYING) {
+          const drift = Math.abs(ytPlayer.getCurrentTime() - serverPos);
+          if (drift > DRIFT_HARD_SEEK_SEC) driftSeek(serverPos);
         }
       } else {
-        const drift = Math.abs(ytPlayer.getCurrentTime() - serverPos);
-        if (drift > 1.25) {
-          ytPlayer.seekTo(serverPos, true);
+        // PAUSED = settled player resuming: align once. UNSTARTED/CUED = still loading: never seek.
+        if (state === YT.PlayerState.PAUSED &&
+            Math.abs(ytPlayer.getCurrentTime() - serverPos) > DRIFT_HARD_SEEK_SEC) {
+          driftSeek(serverPos, true);
+        }
+        if (Date.now() - lastPlayKick > 1000) {
+          lastPlayKick = Date.now();
+          const playPromise = ytPlayer.playVideo();
+          // If playVideo returns a promise, catch unhandled autoplay rejections
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch((e) => console.warn('Autoplay blocked:', e));
+          }
         }
       }
     } else {
@@ -794,6 +900,7 @@ skipBtn?.addEventListener('click', () => {
 
 forceResyncBtn?.addEventListener('click', () => {
   socket.emit('sync-request', (data) => {
+    syncClock();
     if (data && ytReady && ytPlayer) {
       updateClockOffset(data.serverTime);
       currentRoom.playback = data;
