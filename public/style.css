@@ -1,0 +1,768 @@
+/* BeatSync High-Performance 60fps+ Stylesheet */
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+
+:root {
+  --bg: #0A0A0D;
+  --surface: #131318;
+  --surface-raised: #1A1A21;
+  --input-bg: #0E0E12;
+  --border-card: #26262F;
+  --border-ctrl: #2E2E38;
+  --border-outline: #3A3A46;
+  --text-main: #F4F2EA;
+  --text-secondary: #B4B2C0;
+  --text-muted: #9A98A6;
+  --lime: #C8FF3D;
+  --coral: #FF5A4E;
+  --amber: #FFB84D;
+  --sky: #7CE0FF;
+  --sun: #FFD84D;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-main);
+  font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  /* Invisible scrollbars while keeping full scrollability */
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+html {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+/* Chrome, Safari, Edge, WebKit Mobile */
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+#chat-messages::-webkit-scrollbar,
+#queue-list::-webkit-scrollbar,
+#search-results-list::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+button, input {
+  font-family: inherit;
+}
+
+button {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.hidden {
+  display: none !important;
+}
+
+@keyframes inputShake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-6px); }
+  40%, 80% { transform: translateX(6px); }
+}
+
+.input-error {
+  border-color: var(--coral) !important;
+  box-shadow: 0 0 0 2px rgba(255,90,78,0.25) !important;
+  animation: inputShake 0.35s ease !important;
+}
+
+#settings-modal:not(.hidden),
+#leave-confirm-modal:not(.hidden) {
+  display: flex !important;
+}
+
+button:focus-visible, input:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
+}
+
+/* Isolated GPU Layer Card Component */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border-card);
+  border-radius: 28px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  /* CSS Containment to stop page-wide reflows */
+  contain: layout style;
+}
+
+.h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.ghost {
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.ghost:hover {
+  background: #1F1F27;
+}
+
+.chip {
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid var(--border-ctrl);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  transition: border-color 0.12s, color 0.12s;
+}
+
+.chip:hover {
+  border-color: var(--lime);
+  color: var(--text-main);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Skeleton Loading Shimmer */
+@keyframes skeletonShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton-box {
+  background: linear-gradient(90deg, #16161D 0%, #252530 50%, #16161D 100%);
+  background-size: 200% 100%;
+  animation: skeletonShimmer 1.5s infinite ease-in-out;
+  border-radius: 8px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border-radius: 16px;
+  transition: background 0.12s;
+  contain: layout style;
+}
+
+.row:hover {
+  background: var(--surface-raised);
+}
+
+.art {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  flex: none;
+  object-fit: cover;
+  background: var(--surface-raised);
+}
+
+.t {
+  font-size: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-main);
+}
+
+.s {
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.av {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #0A0A0D;
+  flex: none;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+#leave-room-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  line-height: 1 !important;
+  box-sizing: border-box !important;
+  transition: all 0.18s ease;
+}
+
+#leave-room-btn svg {
+  display: block !important;
+  flex-shrink: 0 !important;
+  margin: 0 !important;
+}
+
+#leave-room-btn span {
+  display: none !important;
+}
+
+#leave-room-btn:hover,
+#leave-room-btn:active {
+  border-color: var(--lime) !important;
+  color: var(--lime) !important;
+  background: rgba(200, 255, 61, 0.12) !important;
+  box-shadow: 0 0 16px rgba(200, 255, 61, 0.25) !important;
+}
+
+/* Reaction Button */
+.rb {
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  border: 1px solid var(--border-ctrl);
+  background: var(--surface-raised);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  transition: border-color 0.12s, transform 0.12s;
+  will-change: transform;
+}
+
+.rb:hover {
+  border-color: var(--lime);
+  transform: translateY(-2px);
+}
+
+.rb b {
+  display: none;
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--text-main);
+  color: #0A0A0D;
+  font-size: 11px;
+  font-weight: 700;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  animation: scaleUp3D 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.rb b.has-count {
+  display: flex !important;
+}
+
+/* High-Performance Wavy Audio Progress Bar (PC & Mobile) */
+.wavy-progress-container {
+  position: relative;
+  width: 100%;
+  height: 28px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  contain: layout style;
+}
+
+#wavy-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+
+.wave-base-path {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.16);
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke 0.2s ease;
+}
+
+.wavy-progress-container:hover .wave-base-path {
+  stroke: rgba(255, 255, 255, 0.24);
+}
+
+.wave-active-path {
+  fill: none;
+  stroke: var(--lime);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 5px rgba(200, 255, 61, 0.65));
+}
+
+.wavy-scrubber-knob {
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  transform: translate(-50%, -50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #FFFFFF;
+  box-shadow: 0 0 12px rgba(200, 255, 61, 0.9), 0 0 4px #C8FF3D;
+  pointer-events: none;
+  transition: transform 0.1s ease, width 0.15s ease, height 0.15s ease;
+  z-index: 2;
+}
+
+.wavy-progress-container:hover .wavy-scrubber-knob,
+.wavy-progress-container.is-dragging .wavy-scrubber-knob {
+  width: 15px;
+  height: 15px;
+  background: var(--lime);
+}
+
+/* Subtle organic pulse when playing */
+@keyframes waveSubtlePulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 4px rgba(200, 255, 61, 0.5));
+  }
+  50% {
+    filter: drop-shadow(0 0 8px rgba(200, 255, 61, 0.85));
+  }
+}
+
+.wavy-progress-container.is-playing .wave-active-path {
+  animation: waveSubtlePulse 2.5s infinite ease-in-out;
+}
+
+/* Hardware Accelerated 3D Floating Reaction Animation */
+@keyframes rise3D {
+  0% {
+    transform: translate3d(0, 0, 0) scale(0.7);
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(0, -90px, 0) scale(1.2);
+    opacity: 0;
+  }
+}
+
+.fl {
+  position: absolute;
+  pointer-events: none;
+  will-change: transform, opacity;
+  animation: rise3D 2.4s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fl {
+    animation: none;
+  }
+}
+
+/* Optimized scroll containment for mobile lists */
+#chat-messages, #queue-list, #search-results-list {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  contain: layout style;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+/* Pop-in Modal animation with GPU layer */
+@keyframes scaleUp3D {
+  from {
+    transform: translate3d(0, 0, 0) scale(0.94);
+    opacity: 0;
+  }
+  to {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-scaleUp {
+  will-change: transform, opacity;
+  animation: scaleUp3D 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.go:hover {
+  transform: translateY(-1px);
+}
+
+/* ====================================================
+   ROOM VIEW LAYOUT & DESKTOP SINGLE SCREEN (100vh)
+   ==================================================== */
+
+#room-view {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+#room-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: nowrap;
+  padding: 16px 28px 12px;
+  width: 100%;
+  max-width: 100%;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+.dashboard-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 0 16px 32px;
+  box-sizing: border-box;
+}
+
+.dashboard-card {
+  background: var(--surface);
+  border: 1px solid var(--border-card);
+  border-radius: 20px;
+  padding: 18px 20px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ====================================================
+   MOBILE-FIRST SLEEK REFERENCE LAYOUT (< 768px)
+   ==================================================== */
+@media (max-width: 767.98px) {
+  .desktop-only {
+    display: none !important;
+  }
+
+  .mobile-only {
+    display: flex !important;
+  }
+
+  #room-header-bar {
+    padding: 14px 16px 8px !important;
+  }
+
+  #leave-room-btn {
+    width: 42px !important;
+    height: 42px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  #leave-room-btn span {
+    display: none !important;
+  }
+
+  .dashboard-grid {
+    padding: 0 14px 24px !important;
+    gap: 14px !important;
+  }
+
+  .player-dashboard-card {
+    padding: 16px !important;
+    border-radius: 20px !important;
+    gap: 12px !important;
+  }
+
+  /* Mobile: Stack track info and playback controls vertically */
+  .player-top-row {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+  }
+
+  .player-track-info {
+    display: flex !important;
+    gap: 14px !important;
+    align-items: center !important;
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+
+  .player-controls-cluster {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 22px !important;
+    margin: 2px 0 0 !important;
+  }
+
+  .player-controls-cluster #play-pause-btn {
+    width: 52px !important;
+    height: 52px !important;
+  }
+
+  /* Segmented Tab panels toggle logic on mobile */
+  .tab-panel {
+    display: none !important;
+    border-radius: 20px !important;
+  }
+
+  .tab-panel.active-tab-panel {
+    display: flex !important;
+    flex-direction: column !important;
+  }
+
+  /* Reaction button styling on mobile */
+  .rb {
+    height: 44px !important;
+    border-radius: 12px !important;
+  }
+
+  .rb b {
+    top: -6px !important;
+    right: -4px !important;
+    font-size: 10px !important;
+  }
+
+  /* Mobile Lobby View Compacting */
+  #lobby-view {
+    padding: 20px 18px 36px !important;
+    justify-content: flex-start !important;
+  }
+
+  #lobby-view > div {
+    gap: 24px !important;
+  }
+
+  #lobby-view h1 {
+    font-size: 38px !important;
+  }
+}
+
+/* ====================================================
+   DESKTOP 100VH ZERO-SCROLL 4-CARD 2x2 DASHBOARD (>= 768px)
+   Matching Image 1 Structure with Image 2 Sleek Aesthetics
+   ==================================================== */
+@media (min-width: 768px) {
+  .mobile-only {
+    display: none !important;
+  }
+
+  .desktop-only {
+    display: flex !important;
+  }
+
+  /* Lock viewport to exactly 100vh on Desktop */
+  html:has(#room-view:not(.hidden)),
+  body:has(#room-view:not(.hidden)) {
+    height: 100vh !important;
+    height: 100dvh !important;
+    overflow: hidden !important;
+  }
+
+  #room-view:not(.hidden) {
+    height: 100vh !important;
+    height: 100dvh !important;
+    max-height: 100vh !important;
+    overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+    box-sizing: border-box !important;
+    padding-bottom: 14px !important;
+  }
+
+  #room-header-bar {
+    padding: 14px 28px 10px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    flex: none !important;
+  }
+
+  /* PC Leave Button Pill Shape */
+  #leave-room-btn {
+    width: auto !important;
+    height: 40px !important;
+    padding: 0 16px !important;
+    border-radius: 999px !important;
+    gap: 8px !important;
+    font-size: 13px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    line-height: 1 !important;
+    border: 1px solid var(--border-outline) !important;
+    background: rgba(10,10,13,0.7) !important;
+    color: var(--text-main) !important;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  }
+
+  #leave-room-btn span {
+    display: inline-flex !important;
+    align-items: center !important;
+    line-height: 1 !important;
+    margin-left: 8px !important;
+  }
+
+  #leave-room-btn:hover,
+  #leave-room-btn:active {
+    background: var(--lime) !important;
+    color: #0A0A0D !important;
+    border-color: var(--lime) !important;
+    box-shadow: 0 0 20px rgba(200, 255, 61, 0.45) !important;
+  }
+
+  /* 2x2 Grid Layout: Row 1 = Player + Queue; Row 2 = Search + Chat */
+  .dashboard-grid {
+    display: grid !important;
+    grid-template-columns: 1.25fr 1fr !important;
+    grid-template-rows: 255px 1fr !important;
+    gap: 16px !important;
+    flex: 1 !important;
+    min-height: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 28px !important;
+    max-height: calc(100vh - 72px) !important;
+  }
+
+  .dashboard-card {
+    min-height: 0 !important;
+    overflow: hidden !important;
+    padding: 16px 20px !important;
+  }
+
+  /* All tab panels are continuously visible on desktop */
+  .tab-panel {
+    display: flex !important;
+  }
+
+  /* CARD 1: Player Card */
+  .player-dashboard-card {
+    grid-column: 1 / 2 !important;
+    grid-row: 1 / 2 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: space-between !important;
+    padding: 16px 20px 14px !important;
+  }
+
+  /* Desktop Player Layout: side-by-side title and controls */
+  .player-top-row {
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 16px !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+  }
+
+  .player-track-info {
+    display: flex !important;
+    gap: 14px !important;
+    align-items: center !important;
+    min-width: 0 !important;
+    flex: 1 !important;
+  }
+
+  .player-controls-cluster {
+    display: flex !important;
+    align-items: center !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  /* CARD 2: Queue Card */
+  .queue-dashboard-card {
+    grid-column: 2 / 3 !important;
+    grid-row: 1 / 2 !important;
+    display: flex !important;
+    flex-direction: column !important;
+  }
+
+  #queue-list {
+    flex: 1 !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+  }
+
+  /* CARD 3: Search Card */
+  .search-dashboard-card {
+    grid-column: 1 / 2 !important;
+    grid-row: 2 / 3 !important;
+    display: flex !important;
+    flex-direction: column !important;
+  }
+
+  #search-results-list {
+    flex: 1 !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+  }
+
+  /* CARD 4: Live Chat Card */
+  .chat-dashboard-card {
+    grid-column: 2 / 3 !important;
+    grid-row: 2 / 3 !important;
+    display: flex !important;
+    flex-direction: column !important;
+  }
+
+  #chat-messages {
+    flex: 1 !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+  }
+
+  #hero-art-wrapper {
+    width: 88px !important;
+    height: 88px !important;
+    border-radius: 18px !important;
+  }
+
+  #track-title {
+    font-size: 22px !important;
+  }
+
+  #track-artist {
+    font-size: 14px !important;
+  }
+
+  .reactions-strip .rb {
+    width: 44px !important;
+    height: 38px !important;
+    border-radius: 10px !important;
+    padding: 0 !important;
+  }
+}

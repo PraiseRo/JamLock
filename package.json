@@ -1,0 +1,17 @@
+{
+  "name": "jamlock-app",
+  "version": "1.0.0",
+  "description": "Free, fast, synchronized music listening rooms",
+  "main": "server/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node server/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1",
+    "yt-search": "^2.12.1"
+  }
+}

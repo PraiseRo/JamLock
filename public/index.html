@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JamLock — Music with Friends</title>
+  <link rel="icon" type="image/webp" href="/browser_header.webp">
+  <link rel="apple-touch-icon" href="/browser_header.webp">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/socket.io/socket.io.js"></script>
+
+  <!-- Pre-paint room view check to prevent lobby flicker on refresh -->
+  <script>
+    (function() {
+      try {
+        var urlParams = new URLSearchParams(window.location.search);
+        var storedRoom = localStorage.getItem('jamlock_current_room') || localStorage.getItem('beatsync_current_room');
+        if (urlParams.get('room') || storedRoom) {
+          document.documentElement.classList.add('in-room-loading');
+        }
+      } catch(e) {}
+    })();
+  </script>
+  <style>
+    html.in-room-loading #lobby-view { display: none !important; }
+    html.in-room-loading #room-view { display: flex !important; }
+    html.in-room-loading #room-badge { display: flex !important; }
+    html.in-room-loading #leave-room-btn { display: inline-flex !important; }
+  </style>
+</head>
+<body>
+
+  <!-- Ambient Blurred Background Mesh (Derived from album art / tokens) -->
+  <div id="ambient-backdrop" style="position: fixed; inset: 0; pointer-events: none; z-index: -2; overflow: hidden">
+    <div id="ambient-glow" style="width: 100%; height: 100%; background: radial-gradient(900px 520px at 20% 0%, rgba(200,255,61,0.12), transparent 60%), radial-gradient(800px 520px at 90% 100%, rgba(255,90,78,0.12), transparent 60%), #0A0A0D; transition: background 1.2s ease"></div>
+  </div>
+
+  <!-- FLOATING REACTION PARTICLES CONTAINER -->
+  <div id="reactions-container" style="position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 50"></div>
+
+  <!-- VIEW 1: LOBBY / ENTRY SCREEN (Matches 3-create-or-join.html exactly) -->
+  <div id="lobby-view" style="min-height: 100vh; display: flex; flex-direction: column; justify-content: center; padding: 28px 24px 56px; box-sizing: border-box">
+    <div style="max-width: 1180px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 48px">
+      
+      <!-- Top Brand Header -->
+      <div style="display: flex; align-items: center">
+        <img id="lobby-brand-logo" src="/logo.webp" alt="JamLock" style="height: 48px; width: auto; object-fit: contain; max-width: 200px; margin-left: -6px">
+      </div>
+
+      <!-- Two-Column Hero / Action Section -->
+      <div style="display: flex; gap: 48px; flex-wrap: wrap; align-items: center">
+        
+        <!-- Left: Value Proposition -->
+        <div style="flex: 1; min-width: 300px; display: flex; flex-direction: column; gap: 20px">
+          <span style="font-size: 12px; font-weight: 600; letter-spacing: 0.14em; color: var(--lime)">LISTEN TOGETHER</span>
+          <h1 style="margin: 0; font-size: clamp(38px, 6vw, 68px); line-height: 1.02; letter-spacing: -0.045em; font-weight: 700">
+            Same song.<br>Same second.<br><span style="color: var(--lime)">Any distance.</span>
+          </h1>
+          <p style="margin: 0; font-size: 16px; line-height: 1.5; color: var(--text-secondary); max-width: 440px">
+            Spin up a room, share the code, and everyone hears the same track at the same moment. Queue it up, react, talk over it.
+          </p>
+          <div style="display: flex; align-items: center; gap: 12px; color: var(--text-muted); font-size: 14px">
+            <div style="display: flex">
+              <span style="width: 28px; height: 28px; border-radius: 50%; background: var(--coral); border: 2px solid #0A0A0D; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #0A0A0D">A</span>
+              <span style="width: 28px; height: 28px; border-radius: 50%; background: var(--sky); border: 2px solid #0A0A0D; margin-left: -8px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #0A0A0D">P</span>
+              <span style="width: 28px; height: 28px; border-radius: 50%; background: var(--sun); border: 2px solid #0A0A0D; margin-left: -8px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #0A0A0D">M</span>
+            </div>
+            No account or Spotify subscription needed
+          </div>
+        </div>
+
+        <!-- Right: Cards -->
+        <div style="flex: 1; min-width: 300px; max-width: 520px; display: flex; flex-direction: column; gap: 16px">
+          
+          <!-- Display Name Input -->
+          <div style="background: var(--surface); border: 1px solid var(--border-card); border-radius: 22px; padding: 18px 24px; display: flex; flex-direction: column; gap: 8px">
+            <label for="username-input" style="font-size: 12px; font-weight: 600; letter-spacing: 0.08em; color: var(--text-muted); text-transform: uppercase">Your Display Name <span style="color: var(--coral)">*</span></label>
+            <div style="position: relative; display: flex; align-items: center">
+              <input type="text" id="username-input" placeholder="e.g. Alex" maxlength="20" spellcheck="false" autocorrect="off" autocomplete="off" style="width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 46px 0 14px; font-size: 15px">
+              <button id="save-username-btn" type="button" title="Save name" style="position: absolute; right: 6px; width: 32px; height: 32px; border-radius: 8px; border: 0; background: transparent; color: var(--lime); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s ease">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+              </button>
+            </div>
+            <script>
+              (function() {
+                try {
+                  var saved = localStorage.getItem('jamlock_username') || localStorage.getItem('beatsync_username');
+                  if (saved) document.getElementById('username-input').value = saved;
+                } catch(e) {}
+              })();
+            </script>
+          </div>
+
+          <!-- Start a Room Card -->
+          <div style="background: var(--surface); border: 1px solid var(--border-card); border-radius: 24px; padding: 20px 22px; display: flex; flex-direction: column; gap: 12px">
+            <div>
+              <div style="font-size: 18px; font-weight: 600; letter-spacing: -0.02em">Start a room</div>
+              <div style="font-size: 13px; color: var(--text-muted); margin-top: 3px">You get a code to share. Takes two seconds.</div>
+            </div>
+            <button id="create-room-btn" class="go" style="height: 52px; border-radius: 16px; border: 0; background: var(--lime); color: #0A0A0D; font-size: 16px; font-weight: 700; box-shadow: 0 8px 28px rgba(200,255,61,0.28)">
+              Create room
+            </button>
+          </div>
+
+          <!-- Sleek "Have a code?" Divider & Inline Join Group (Matching Image 1) -->
+          <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 4px">
+            <div style="display: flex; align-items: center; gap: 14px">
+              <div style="flex: 1; height: 1px; background: rgba(255,255,255,0.1)"></div>
+              <span style="font-size: 13px; color: var(--text-muted); letter-spacing: 0.02em; white-space: nowrap">Have a code?</span>
+              <div style="flex: 1; height: 1px; background: rgba(255,255,255,0.1)"></div>
+            </div>
+            <div style="display: flex; gap: 10px">
+              <input id="join-code-input" aria-label="Room code" placeholder="XK92-UE47" spellcheck="false" autocorrect="off" autocapitalize="characters" autocomplete="off" maxlength="12" style="flex: 1; min-width: 0; height: 48px; border-radius: 14px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 16px; font-family: 'JetBrains Mono', monospace; font-size: 16px; letter-spacing: 0.12em">
+              <button id="join-room-btn" class="ghost" style="height: 48px; padding: 0 24px; border-radius: 14px; border: 1px solid var(--border-outline); background: rgba(255,255,255,0.04); color: var(--text-main); font-size: 15px; font-weight: 600">
+                Join
+              </button>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+
+  <!-- VIEW 2: ACTIVE ROOM VIEW -->
+  <div id="room-view" class="hidden">
+
+    <!-- TOP HEADER BAR (Unified across Mobile & Desktop) -->
+    <header id="room-header-bar">
+      <div style="display: flex; align-items: center; gap: 12px; min-width: 0">
+        <div class="desktop-only" style="display: flex; align-items: center">
+          <img src="/logo.webp" alt="JamLock" style="height: 38px; width: auto; object-fit: contain; max-width: 160px">
+        </div>
+
+        <!-- Room Badge Pill -->
+        <div id="room-badge" style="display: flex; align-items: center; gap: 8px; background: rgba(10,10,13,0.7); border: 1px solid var(--border-ctrl); border-radius: 999px; padding: 6px 14px; flex-shrink: 0">
+          <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 10px var(--lime)"></span>
+          <span class="mono" style="color: var(--text-main); letter-spacing: 0.08em; font-weight: 700; font-size: 13px" id="room-code-display"></span>
+          <span id="listening-count-display" style="font-size: 12px; color: var(--text-muted); margin-left: 2px">1 here</span>
+          <button id="copy-room-link-btn" class="ghost" title="Copy Invite Link" style="width: 24px; height: 24px; border-radius: 50%; border: 0; background: transparent; color: var(--text-main); display: flex; align-items: center; justify-content: center">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+          <button id="host-settings-btn" class="ghost hidden" title="Room Host Settings" style="width: 24px; height: 24px; border-radius: 50%; border: 0; background: transparent; color: var(--text-muted); display: flex; align-items: center; justify-content: center">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+        </div>
+
+        <!-- Listening avatars strip (Desktop) -->
+        <div class="desktop-only" style="display: flex; align-items: center; gap: 8px">
+          <div id="users-strip" style="display: flex; align-items: center; margin-left: 4px"></div>
+        </div>
+      </div>
+
+      <button id="leave-room-btn" class="ghost" title="Leave room">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        <span class="desktop-only" style="margin-left: 8px; font-size: 13px; font-weight: 600">Leave room</span>
+      </button>
+    </header>
+
+    <!-- MAIN DASHBOARD (4-Card Grid on Desktop, Stack/Tabs on Mobile) -->
+    <div id="room-dashboard-grid" class="dashboard-grid">
+
+      <!-- CARD 1 (Top-Left): NOW PLAYING CARD -->
+      <section id="panel-player" class="card dashboard-card player-dashboard-card">
+        <!-- Top Half: Artwork + Metadata + Playback Controls (Side-by-side on desktop, stacked on mobile) -->
+        <div class="player-top-row">
+          
+          <!-- Left: Artwork + Title/Artist Info -->
+          <div class="player-track-info">
+            <!-- Album Art Cover -->
+            <div id="hero-art-wrapper" style="position: relative; width: 76px; height: 76px; flex: none; border-radius: 16px; overflow: hidden; background: var(--surface-raised); box-shadow: 0 12px 30px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1)">
+              <!-- Empty State Graphic -->
+              <div id="empty-hero-art" style="width: 100%; height: 100%; position: relative; background: radial-gradient(circle at 25% 20%, var(--lime) 0, transparent 48%), radial-gradient(circle at 80% 85%, var(--coral) 0, transparent 55%), #1A1A21; display: flex; align-items: center; justify-content: center">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#0A0A0D" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+              </div>
+              <!-- Playing State Artwork -->
+              <img id="track-art" src="" alt="Album Art" style="width: 100%; height: 100%; object-fit: cover; display: none; transition: opacity 0.3s">
+            </div>
+
+            <!-- Metadata -->
+            <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px">
+              <div style="display: flex; align-items: center; gap: 8px">
+                <span style="font-size: 10px; font-weight: 700; letter-spacing: 0.12em; color: var(--lime); text-transform: uppercase" id="player-status-badge">
+                  READY TO PLAY
+                </span>
+                <div id="added-by-badge" style="display: none; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted)">
+                  <span id="added-by-avatar" class="av" style="background: var(--coral); width: 16px; height: 16px; font-size: 9px">A</span>
+                  <span id="added-by-text">added by host</span>
+                </div>
+              </div>
+
+              <h1 id="track-title" style="margin: 0; font-size: 17px; line-height: 1.25; letter-spacing: -0.02em; font-weight: 700; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word">
+                Nothing playing yet
+              </h1>
+
+              <p id="track-artist" style="margin: 0; font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis"></p>
+            </div>
+          </div>
+
+          <!-- Playback Controls Cluster (Beside title on desktop, centered underneath on mobile) -->
+          <div class="player-controls-cluster">
+            <!-- Snap / Resync Button -->
+            <button id="force-resync-btn" class="ghost" aria-label="Snap to Host" title="Snap to Host" style="width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--border-outline); background: rgba(255,255,255,0.06); color: var(--text-main); display: flex; align-items: center; justify-content: center">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            </button>
+
+            <!-- Glowing Lime Play Button -->
+            <button id="play-pause-btn" aria-label="Play / Pause" class="go" style="width: 48px; height: 48px; border-radius: 50%; border: 0; background: var(--lime); color: #0A0A0D; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 20px rgba(200,255,61,0.45)">
+              <svg id="play-icon" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" style="transform: translateX(1.5px)"><path d="M8 5v14l11-7z"/></svg>
+              <svg id="pause-icon" class="hidden" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+            </button>
+
+            <!-- Skip Button -->
+            <button id="skip-btn" class="ghost" aria-label="Skip to next" style="width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--border-outline); background: rgba(255,255,255,0.06); color: var(--text-main); display: flex; align-items: center; justify-content: center">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+            </button>
+          </div>
+
+        </div>
+
+        <!-- Middle: Scrubber / Interactive Wavy Progress Bar -->
+        <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px">
+          <!-- Wavy Audio Progress Bar (Unified PC & Mobile) -->
+          <div id="wavy-progress-container" class="wavy-progress-container" aria-label="Wavy Progress Bar" title="Tap or drag to seek">
+            <svg id="wavy-svg" viewBox="0 0 1000 32" preserveAspectRatio="none">
+              <defs>
+                <clipPath id="wave-progress-clip">
+                  <rect id="wave-clip-rect" x="0" y="0" width="0" height="32" />
+                </clipPath>
+              </defs>
+              <!-- Base Inactive Muted Wave -->
+              <path id="wave-base-path" class="wave-base-path" />
+              <!-- Active Lime Wave (Clipped by current progress) -->
+              <path id="wave-active-path" class="wave-active-path" clip-path="url(#wave-progress-clip)" />
+            </svg>
+            <div id="wavy-scrubber-knob" class="wavy-scrubber-knob"></div>
+          </div>
+          
+          <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); padding: 0 2px">
+            <span id="current-time">0:00</span>
+            <span id="total-duration">0:00</span>
+          </div>
+        </div>
+
+        <!-- Bottom: Reaction Buttons Centered in Middle with balanced vertical spacing -->
+        <div style="display: flex; align-items: center; justify-content: center; margin: 4px auto 0">
+          <div class="reactions-strip" style="display: flex; align-items: center; gap: 10px">
+            <button class="rb reaction-btn" data-emoji="🔥" aria-label="Fire reaction" style="color: var(--amber)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
+              <b id="rx-fire-count"></b>
+            </button>
+            <button class="rb reaction-btn" data-emoji="❤️" aria-label="Love reaction" style="color: var(--coral)">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>
+              <b id="rx-love-count"></b>
+            </button>
+            <button class="rb reaction-btn" data-emoji="⚡" aria-label="Energy reaction" style="color: var(--lime)">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+              <b id="rx-zap-count"></b>
+            </button>
+            <button class="rb reaction-btn" data-emoji="✨" aria-label="Sparkle reaction" style="color: var(--sky)">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>
+              <b id="rx-star-count"></b>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- MOBILE TABS BAR (Visible only on mobile, placed directly below Currently Playing) -->
+      <div id="mobile-tabs-bar" class="mobile-only" style="display: none; background: #131318; padding: 5px; border-radius: 16px; margin: 0 0 4px; border: 1px solid var(--border-ctrl); gap: 6px">
+        <button id="tab-btn-queue" class="mobile-tab-btn active" style="flex: 1; height: 38px; border-radius: 12px; border: 0; background: var(--text-main); color: #0A0A0D; font-size: 14px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center">
+          Queue <span id="mobile-queue-count" style="font-size: 12px; font-family: 'JetBrains Mono', monospace; margin-left: 5px">0</span>
+        </button>
+        <button id="tab-btn-chat" class="mobile-tab-btn" style="flex: 1; height: 38px; border-radius: 12px; border: 0; background: transparent; color: var(--text-secondary); font-size: 14px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; position: relative">
+          Chat
+          <span id="mobile-chat-unread" class="hidden" style="background: var(--coral); color: #0A0A0D; border-radius: 999px; padding: 1px 6px; font-size: 11px; font-weight: 700; margin-left: 6px; line-height: 1.4">0</span>
+        </button>
+        <button id="tab-btn-search" class="mobile-tab-btn" style="flex: 1; height: 38px; border-radius: 12px; border: 0; background: transparent; color: var(--text-secondary); font-size: 14px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center">
+          Search
+        </button>
+      </div>
+
+      <!-- CARD 2 (Top-Right): UP NEXT QUEUE CARD -->
+      <section id="panel-queue" class="card dashboard-card tab-panel queue-dashboard-card">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px">
+          <div style="display: flex; align-items: center; gap: 8px">
+            <h2 class="h2" style="font-size: 16px; margin: 0">Up next</h2>
+            <span id="queue-count-badge" class="mono" style="background: #1F1F27; color: var(--lime); border-radius: 999px; padding: 2px 8px; font-size: 12px">0</span>
+          </div>
+          
+          <!-- Styled Auto-Suggest Switch -->
+          <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary)">
+            <span>Auto-suggest</span>
+            <button type="button" id="auto-suggest-switch-btn" role="switch" aria-checked="true" aria-label="Auto-suggest" style="width: 40px; height: 24px; border-radius: 999px; border: 0; background: var(--lime); position: relative; padding: 0; transition: background 0.2s">
+              <span id="auto-suggest-switch-knob" style="position: absolute; right: 3px; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #0A0A0D; transition: transform 0.2s"></span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Dynamic Queue Item Rows (Scrollable internally) -->
+        <div id="queue-list" style="display: flex; flex-direction: column; gap: 4px; overflow-y: auto; flex: 1; min-height: 0">
+          <div style="padding: 24px 0; text-align: center; color: var(--text-muted); font-size: 13px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; height: 100%">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.35"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+            <div>Queue is currently empty</div>
+            <div style="font-size: 12px; color: var(--text-muted); opacity: 0.8">Search songs to queue tracks</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- CARD 3 (Bottom-Left): SEARCH & RESULTS CARD -->
+      <section id="panel-search" class="card dashboard-card tab-panel search-dashboard-card">
+        <!-- Active Search Input Box -->
+        <div style="display: flex; align-items: center; gap: 12px; height: 50px; padding: 0 16px; border-radius: 14px; background: var(--input-bg); border: 1px solid var(--border-ctrl)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          <input id="inline-search-input" aria-label="Search songs or paste a YouTube link" placeholder="Search any song, artist, album, remix or paste YouTube URL..." style="flex: 1; min-width: 0; height: 100%; background: transparent; border: 0; outline: none; color: var(--text-main); font-size: 14px">
+          <span id="search-spinner" class="hidden" style="color: var(--lime); font-size: 12px">Searching...</span>
+          <span class="mono" style="border: 1px solid var(--border-outline); border-radius: 6px; padding: 2px 7px; font-size: 11px; color: var(--text-muted)">/</span>
+        </div>
+
+        <!-- Search Results (Shown dynamically when user types) -->
+        <div id="search-results-section" class="hidden" style="display: flex; flex-direction: column; gap: 8px; margin-top: 10px; flex: 1; min-height: 0; overflow-y: auto">
+          <div class="mono" style="font-size: 11px; letter-spacing: 0.1em; color: var(--lime)">SEARCH RESULTS</div>
+          <div id="search-results-list" style="display: flex; flex-direction: column; gap: 4px; overflow-y: auto"></div>
+        </div>
+
+        <!-- Clean Initial Search Prompt (Shown when search is empty) -->
+        <div id="search-empty-prompt" style="padding: 24px 16px; text-align: center; color: var(--text-muted); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; flex: 1">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.35"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          <div style="font-size: 13px; font-weight: 500; color: var(--text-secondary)">Type any artist or track name above</div>
+          <div style="font-size: 12px; color: var(--text-muted)">Instant sub-second results will appear here</div>
+        </div>
+      </section>
+
+      <!-- CARD 4 (Bottom-Right): ROOM CHAT CARD -->
+      <section id="panel-chat" class="card dashboard-card tab-panel chat-dashboard-card">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px">
+          <h2 class="h2" style="font-size: 16px; margin: 0">Room chat</h2>
+          <span style="display: flex; align-items: center; gap: 5px; font-size: 11px; color: #FF8A80; letter-spacing: 0.1em; font-weight: 700">
+            <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--coral)"></span>LIVE
+          </span>
+        </div>
+
+        <!-- Messages Stream (Scrollable internally) -->
+        <div id="chat-messages" style="flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 8px; min-height: 0; overflow-y: auto; padding-right: 4px"></div>
+
+        <!-- Chat Input Form -->
+        <form id="chat-form" style="display: flex; gap: 8px; margin-top: 8px">
+          <input id="chat-input" aria-label="Message the room" placeholder="Say something in room..." maxlength="200" style="flex: 1; min-width: 0; height: 44px; border-radius: 12px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 14px; font-size: 14px">
+          <button type="submit" aria-label="Send" style="height: 44px; padding: 0 18px; border-radius: 12px; border: 0; background: rgba(255,255,255,0.06); color: var(--text-main); font-weight: 600; font-size: 14px; display: flex; align-items: center; justify-content: center">
+            Send
+          </button>
+        </form>
+      </section>
+
+    </div>
+  </div>
+
+  </div>
+
+  <!-- AUDIO STREAM HOST (Placed behind dark background UI to prevent browser offscreen throttling) -->
+  <div id="yt-player-container" style="position: fixed; bottom: 0; right: 0; width: 240px; height: 180px; pointer-events: none; opacity: 0.005; z-index: -100; overflow: hidden">
+    <div id="yt-player"></div>
+  </div>
+
+  <!-- TOAST NOTIFICATION CONTAINER -->
+  <div id="toast-container" style="position: fixed; bottom: 24px; right: 24px; z-index: 50; display: flex; flex-direction: column; gap: 8px; pointer-events: none"></div>
+
+  <!-- HOST PERMISSIONS MODAL -->
+  <div id="settings-modal" class="hidden" style="position: fixed; inset: 0; z-index: 9999; display: none; align-items: center; justify-content: center; padding: 16px; background: rgba(0,0,0,0.85)">
+    <div class="card animate-scaleUp" style="max-width: 380px; width: 100%; padding: 24px">
+      <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-ctrl); padding-bottom: 12px">
+        <h3 style="margin: 0; font-size: 16px; font-weight: 700; color: var(--text-main)">Room Host Controls</h3>
+        <button id="close-settings-modal-btn" style="background: none; border: 0; color: var(--text-muted); font-size: 16px">✕</button>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 14px; font-size: 13px">
+        <div>
+          <label style="display: block; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px">DJ Playback Control</label>
+          <select id="setting-dj-mode" style="width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 12px">
+            <option value="anyone">Anyone can play, pause, seek, or skip</option>
+            <option value="host-only">Host Only (Guests can only listen)</option>
+          </select>
+        </div>
+
+        <div>
+          <label style="display: block; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px">Queue Permissions</label>
+          <select id="setting-queue-mode" style="width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 12px">
+            <option value="anyone">Anyone can add songs to queue</option>
+            <option value="host-only">Host Only (Only host can add songs)</option>
+          </select>
+        </div>
+      </div>
+
+      <button id="save-settings-btn" style="height: 46px; border-radius: 14px; border: 0; background: var(--lime); color: #0A0A0D; font-size: 14px; font-weight: 700; margin-top: 8px">
+        Save Settings
+      </button>
+    </div>
+  </div>
+
+  <!-- CONFIRM LEAVE ROOM MODAL -->
+  <div id="leave-confirm-modal" class="hidden" style="position: fixed; inset: 0; z-index: 9999; display: none; align-items: center; justify-content: center; padding: 16px; background: rgba(0,0,0,0.88)">
+    <div class="card animate-scaleUp" style="max-width: 360px; width: 100%; padding: 26px; text-align: center; gap: 16px">
+      <div style="width: 50px; height: 50px; border-radius: 50%; background: rgba(255,90,78,0.12); border: 1px solid rgba(255,90,78,0.25); color: var(--coral); display: flex; align-items: center; justify-content: center; margin: 0 auto">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+      </div>
+      <div>
+        <h3 style="margin: 0; font-size: 18px; font-weight: 700">Leave Listening Room?</h3>
+        <p style="margin: 8px 0 0; font-size: 13px; color: var(--text-secondary); line-height: 1.5">You will disconnect from the group session and return to the home screen.</p>
+      </div>
+      <div style="display: flex; gap: 10px; margin-top: 4px">
+        <button id="cancel-leave-btn" class="ghost" style="flex: 1; height: 46px; border-radius: 14px; border: 1px solid var(--border-outline); background: transparent; color: var(--text-main); font-size: 14px; font-weight: 600">
+          Stay
+        </button>
+        <button id="confirm-leave-btn" style="flex: 1; height: 46px; border-radius: 14px; border: 0; background: var(--coral); color: #0A0A0D; font-size: 14px; font-weight: 700">
+          Leave Room
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
