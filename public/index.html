@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>JamLock — Music with Friends</title>
+  <title>JamBeat — Music with Friends</title>
   <link rel="icon" type="image/webp" href="/browser_header.webp">
   <link rel="apple-touch-icon" href="/browser_header.webp">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -29,6 +29,11 @@
     html.in-room-loading #room-view { display: flex !important; }
     html.in-room-loading #room-badge { display: flex !important; }
     html.in-room-loading #leave-room-btn { display: inline-flex !important; }
+
+    /* Instant Skeletons when hydrating room state */
+    html.in-room-loading .data-on-load { display: none !important; }
+    html.in-room-loading .skeleton-on-load { display: flex !important; }
+    html:not(.in-room-loading) .skeleton-on-load { display: none !important; }
   </style>
 </head>
 <body>
@@ -47,7 +52,7 @@
       
       <!-- Top Brand Header -->
       <div style="display: flex; align-items: center">
-        <img id="lobby-brand-logo" src="/logo.webp" alt="JamLock" style="height: 48px; width: auto; object-fit: contain; max-width: 200px; margin-left: -6px">
+        <img id="lobby-brand-logo" src="/logo.webp" alt="JamBeat" style="height: 48px; width: auto; object-fit: contain; max-width: 200px; margin-left: -6px">
       </div>
 
       <!-- Two-Column Hero / Action Section -->
@@ -135,14 +140,16 @@
     <header id="room-header-bar">
       <div style="display: flex; align-items: center; gap: 12px; min-width: 0">
         <div class="desktop-only" style="display: flex; align-items: center">
-          <img src="/logo.webp" alt="JamLock" style="height: 38px; width: auto; object-fit: contain; max-width: 160px">
+          <img src="/logo.webp" alt="JamBeat" style="height: 38px; width: auto; object-fit: contain; max-width: 160px">
         </div>
 
         <!-- Room Badge Pill -->
         <div id="room-badge" style="display: flex; align-items: center; gap: 8px; background: rgba(10,10,13,0.7); border: 1px solid var(--border-ctrl); border-radius: 999px; padding: 6px 14px; flex-shrink: 0">
           <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 10px var(--lime)"></span>
-          <span class="mono" style="color: var(--text-main); letter-spacing: 0.08em; font-weight: 700; font-size: 13px" id="room-code-display"></span>
-          <span id="listening-count-display" style="font-size: 12px; color: var(--text-muted); margin-left: 2px">1 here</span>
+          <span class="mono data-on-load" style="color: var(--text-main); letter-spacing: 0.08em; font-weight: 700; font-size: 13px" id="room-code-display"></span>
+          <span id="listening-count-display" class="data-on-load" style="font-size: 12px; color: var(--text-muted); margin-left: 2px">1 here</span>
+          <!-- Skeleton Shimmer for Badge during refresh -->
+          <span class="skeleton-box skeleton-on-load" style="width: 65px; height: 14px; border-radius: 4px; display: none"></span>
           <button id="copy-room-link-btn" class="ghost" title="Copy Invite Link" style="width: 24px; height: 24px; border-radius: 50%; border: 0; background: transparent; color: var(--text-main); display: flex; align-items: center; justify-content: center">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           </button>
@@ -173,33 +180,46 @@
           
           <!-- Left: Artwork + Title/Artist Info -->
           <div class="player-track-info">
-            <!-- Album Art Cover -->
-            <div id="hero-art-wrapper" style="position: relative; width: 76px; height: 76px; flex: none; border-radius: 16px; overflow: hidden; background: var(--surface-raised); box-shadow: 0 12px 30px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1)">
-              <!-- Empty State Graphic -->
-              <div id="empty-hero-art" style="width: 100%; height: 100%; position: relative; background: radial-gradient(circle at 25% 20%, var(--lime) 0, transparent 48%), radial-gradient(circle at 80% 85%, var(--coral) 0, transparent 55%), #1A1A21; display: flex; align-items: center; justify-content: center">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#0A0A0D" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+            <!-- Skeleton for Track Info (Shown on refresh) -->
+            <div class="skeleton-on-load" style="display: none; align-items: center; gap: 14px; width: 100%">
+              <div class="skeleton-box" style="width: 76px; height: 76px; border-radius: 16px; flex: none"></div>
+              <div style="flex: 1; display: flex; flex-direction: column; gap: 8px">
+                <div class="skeleton-box" style="width: 70px; height: 12px; border-radius: 4px"></div>
+                <div class="skeleton-box" style="width: 80%; height: 20px; border-radius: 6px"></div>
+                <div class="skeleton-box" style="width: 50%; height: 14px; border-radius: 4px"></div>
               </div>
-              <!-- Playing State Artwork -->
-              <img id="track-art" src="" alt="Album Art" style="width: 100%; height: 100%; object-fit: cover; display: none; transition: opacity 0.3s">
             </div>
 
-            <!-- Metadata -->
-            <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px">
-              <div style="display: flex; align-items: center; gap: 8px">
-                <span style="font-size: 10px; font-weight: 700; letter-spacing: 0.12em; color: var(--lime); text-transform: uppercase" id="player-status-badge">
-                  READY TO PLAY
-                </span>
-                <div id="added-by-badge" style="display: none; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted)">
-                  <span id="added-by-avatar" class="av" style="background: var(--coral); width: 16px; height: 16px; font-size: 9px">A</span>
-                  <span id="added-by-text">added by host</span>
+            <!-- Live Track Info (Hidden during in-room-loading, revealed once data arrives) -->
+            <div class="data-on-load" style="display: flex; align-items: center; gap: 14px; width: 100%; min-width: 0">
+              <!-- Album Art Cover -->
+              <div id="hero-art-wrapper" style="position: relative; width: 76px; height: 76px; flex: none; border-radius: 16px; overflow: hidden; background: var(--surface-raised); box-shadow: 0 12px 30px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1)">
+                <!-- Empty State Graphic -->
+                <div id="empty-hero-art" style="width: 100%; height: 100%; position: relative; background: radial-gradient(circle at 25% 20%, var(--lime) 0, transparent 48%), radial-gradient(circle at 80% 85%, var(--coral) 0, transparent 55%), #1A1A21; display: flex; align-items: center; justify-content: center">
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#0A0A0D" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
                 </div>
+                <!-- Playing State Artwork -->
+                <img id="track-art" src="" alt="Album Art" style="width: 100%; height: 100%; object-fit: cover; display: none; transition: opacity 0.3s">
               </div>
 
-              <h1 id="track-title" style="margin: 0; font-size: 17px; line-height: 1.25; letter-spacing: -0.02em; font-weight: 700; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word">
-                Nothing playing yet
-              </h1>
+              <!-- Metadata -->
+              <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px">
+                <div style="display: flex; align-items: center; gap: 8px">
+                  <span style="font-size: 10px; font-weight: 700; letter-spacing: 0.12em; color: var(--lime); text-transform: uppercase" id="player-status-badge">
+                    READY TO PLAY
+                  </span>
+                  <div id="added-by-badge" style="display: none; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted)">
+                    <span id="added-by-avatar" class="av" style="background: var(--coral); width: 16px; height: 16px; font-size: 9px">A</span>
+                    <span id="added-by-text">added by host</span>
+                  </div>
+                </div>
 
-              <p id="track-artist" style="margin: 0; font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis"></p>
+                <h1 id="track-title" style="margin: 0; font-size: 17px; line-height: 1.25; letter-spacing: -0.02em; font-weight: 700; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word">
+                  Nothing playing yet
+                </h1>
+
+                <p id="track-artist" style="margin: 0; font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis"></p>
+              </div>
             </div>
           </div>
 
@@ -302,8 +322,33 @@
           </div>
         </div>
 
+        <!-- Skeleton Queue Placeholder (Shown during refresh hydration) -->
+        <div id="queue-skeleton" class="skeleton-on-load" style="display: none; flex-direction: column; gap: 8px; flex: 1">
+          <div style="display: flex; align-items: center; gap: 10px; padding: 8px">
+            <div class="skeleton-box" style="width: 44px; height: 44px; border-radius: 10px; flex: none"></div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 6px">
+              <div class="skeleton-box" style="width: 75%; height: 14px; border-radius: 4px"></div>
+              <div class="skeleton-box" style="width: 45%; height: 11px; border-radius: 3px"></div>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px; padding: 8px">
+            <div class="skeleton-box" style="width: 44px; height: 44px; border-radius: 10px; flex: none"></div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 6px">
+              <div class="skeleton-box" style="width: 60%; height: 14px; border-radius: 4px"></div>
+              <div class="skeleton-box" style="width: 35%; height: 11px; border-radius: 3px"></div>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px; padding: 8px">
+            <div class="skeleton-box" style="width: 44px; height: 44px; border-radius: 10px; flex: none"></div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 6px">
+              <div class="skeleton-box" style="width: 70%; height: 14px; border-radius: 4px"></div>
+              <div class="skeleton-box" style="width: 40%; height: 11px; border-radius: 3px"></div>
+            </div>
+          </div>
+        </div>
+
         <!-- Dynamic Queue Item Rows (Scrollable internally) -->
-        <div id="queue-list" style="display: flex; flex-direction: column; gap: 4px; overflow-y: auto; flex: 1; min-height: 0">
+        <div id="queue-list" class="data-on-load" style="display: flex; flex-direction: column; gap: 4px; overflow-y: auto; flex: 1; min-height: 0">
           <div style="padding: 24px 0; text-align: center; color: var(--text-muted); font-size: 13px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; height: 100%">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.35"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
             <div>Queue is currently empty</div>

@@ -1,5 +1,5 @@
 {
-  "name": "jamlock-app",
+  "name": "jambeat-app",
   "version": "1.0.0",
   "description": "Free, fast, synchronized music listening rooms",
   "main": "server/server.js",

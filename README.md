@@ -1,4 +1,4 @@
-# BeatSync - Realtime Synchronized Music Player
+# JamBeat - Realtime Synchronized Music Player
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
@@ -37,6 +37,6 @@ A fast, responsive web application where friends can listen to music together in
 
 ## ⚖️ Disclaimer & Fair Use
 
-- **Third-Party Content**: BeatSync does not host, upload, or re-stream copyrighted media files. All playback is rendered directly on client devices via the YouTube IFrame API in accordance with YouTube Terms of Service.
+- **Third-Party Content**: JamBeat does not host, upload, or re-stream copyrighted media files. All playback is rendered directly on client devices via the YouTube IFrame API in accordance with YouTube Terms of Service.
 - **Intellectual Property**: All music, artist names, trademarks, and album artwork remain the property of their respective copyright holders.
-- **Educational / Open Source**: BeatSync is an open-source demonstration of real-time WebSocket state synchronization, provided "as is" under the MIT License without warranty.
+- **Educational / Open Source**: JamBeat is an open-source demonstration of real-time WebSocket state synchronization, provided "as is" under the MIT License without warranty.

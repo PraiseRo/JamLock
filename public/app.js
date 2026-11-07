@@ -432,8 +432,11 @@ function joinRoom(roomId, explicitUsername) {
 
       renderRoomState(response.room);
       startSyncEngine();
+      // Remove loading state with a smooth dissolve once room state is hydrated
+      document.documentElement.classList.remove('in-room-loading');
       showToast(`Connected to room ${roomId}`, 'success');
     } else if (response?.error) {
+      document.documentElement.classList.remove('in-room-loading');
       showToast(response.error, 'error');
     }
   });
