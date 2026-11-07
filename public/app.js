@@ -641,6 +641,18 @@ if (nativeAudio) {
     if (activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
     fallbackToYouTubeTrack(currentRoom);
   });
+
+  // If mobile OS briefly pauses audio during app-switch or screen-lock transition while room is playing, resume
+  nativeAudio.addEventListener('pause', () => {
+    if (activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
+    if (currentRoom.playback?.isPlaying && !nativeAudio.ended && document.hidden) {
+      setTimeout(() => {
+        if (activeEngine === 'audio' && currentRoom?.playback?.isPlaying && nativeAudio.paused) {
+          nativeAudio.play().catch(() => {});
+        }
+      }, 120);
+    }
+  });
 }
 
 // Single place that seeks for drift correction. Compensates for seek latency.
@@ -887,8 +899,8 @@ function fallbackToYouTubeTrack(room) {
   } catch (e) {}
 }
 
-// Load the room's current track into the Hybrid Audio Engine (Native <audio> first, YouTube IFrame fallback)
-async function loadCurrentTrack(room) {
+// Load the room's current track into the Hybrid Audio Engine (Synchronous Native <audio> first, YouTube IFrame fallback)
+function loadCurrentTrack(room) {
   if (!room?.currentTrack) return;
   const track = room.currentTrack;
   const trackId = track.id;
@@ -896,46 +908,50 @@ async function loadCurrentTrack(room) {
   loadedTrackId = trackId;
   settlePending = true;
   lastSeekAt = Date.now(); // no drift seeks while the new track is loading
-  const myToken = ++loadRequestToken;
+  ++loadRequestToken;
 
   updateMediaSessionMetadata(track);
   syncWakeLock(Boolean(room.playback?.isPlaying));
 
-  // Query server for direct background-capable audio stream
-  try {
-    const params = new URLSearchParams({
-      id: track.id || '',
-      title: track.cleanTitle || track.title || '',
-      artist: track.artist || '',
-      duration: String(track.durationSeconds || 0)
-    });
-    const res = await fetch(`/api/stream-source?${params.toString()}`);
-    const data = res.ok ? await res.json() : null;
-    if (myToken !== loadRequestToken) return; // Track changed while resolving
-
-    if (data?.mode === 'audio' && data.url && nativeAudio) {
-      activeEngine = 'audio';
-      // Stop YouTube iframe so it never double-plays
-      if (ytReady && ytPlayer && typeof ytPlayer.stopVideo === 'function') {
-        try { ytPlayer.stopVideo(); } catch (e) {}
-      }
-      nativeAudio.src = data.url;
-      nativeAudio.muted = isMuted;
-      nativeAudio.volume = Math.max(0, Math.min(1, currentVolume / 100));
-      nativeAudio.currentTime = Math.max(0, calculateServerPosition());
-
-      if (currentRoom?.playback?.isPlaying) {
-        nativeAudio.play().catch(() => {
-          showAudioPrompt(true);
-        });
-      } else {
-        nativeAudio.pause();
-      }
-      return;
+  if (nativeAudio && trackId) {
+    activeEngine = 'audio';
+    // Stop YouTube iframe so it never double-plays
+    if (ytReady && ytPlayer && typeof ytPlayer.stopVideo === 'function') {
+      try { ytPlayer.stopVideo(); } catch (e) {}
     }
-  } catch (e) {}
 
-  if (myToken !== loadRequestToken) return;
+    const startPos = Math.max(0, calculateServerPosition());
+    nativeAudio.src = `/api/audio/${encodeURIComponent(trackId)}`;
+    nativeAudio.muted = isMuted;
+    nativeAudio.volume = Math.max(0, Math.min(1, currentVolume / 100));
+
+    // Seek to server position as soon as metadata is ready
+    const onLoadedMeta = () => {
+      nativeAudio.removeEventListener('loadedmetadata', onLoadedMeta);
+      const target = Math.max(0, calculateServerPosition());
+      if (target > 0.5) {
+        try { nativeAudio.currentTime = target; } catch (e) {}
+      }
+      if (currentRoom?.playback?.isPlaying && nativeAudio.paused) {
+        nativeAudio.play().catch(() => showAudioPrompt(true));
+      }
+    };
+    nativeAudio.addEventListener('loadedmetadata', onLoadedMeta);
+
+    if (startPos > 0.5) {
+      try { nativeAudio.currentTime = startPos; } catch (e) {}
+    }
+
+    if (currentRoom?.playback?.isPlaying) {
+      nativeAudio.play().catch(() => {
+        showAudioPrompt(true);
+      });
+    } else {
+      nativeAudio.pause();
+    }
+    return;
+  }
+
   fallbackToYouTubeTrack(room);
 }
 

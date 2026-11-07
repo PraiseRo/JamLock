@@ -7,7 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { rooms } from './rooms.js';
 import { searchSongs, getRecommendations } from './search.js';
-import { resolveAudioStream } from './audioResolver.js';
+import { resolveAudioStream, streamAudioToClient, getYoutubeAudioFormat } from './audioResolver.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -123,6 +123,11 @@ app.get('/api/room/:roomId', (req, res) => {
     return res.status(404).json({ error: 'Room not found' });
   }
   return res.json(rooms.serializeRoom(room));
+});
+
+// API: Direct Audio Stream Proxy (HTTP 206 Byte-Range M4A for iOS Safari & Android background playback)
+app.get('/api/audio/:videoId', (req, res) => {
+  streamAudioToClient(req, res);
 });
 
 // API: Direct Audio Stream Resolver for Mobile Background Playback (with YT IFrame fallback)
@@ -277,6 +282,7 @@ io.on('connection', (socket) => {
     if (!cleanTrack) return;
 
     rooms.addToQueue(currentRoomId, cleanTrack, playNext);
+    getYoutubeAudioFormat(cleanTrack.id).catch(() => {});
     scheduleAutoAdvance(currentRoomId);
     io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
     io.to(currentRoomId).emit('notification', {
@@ -300,6 +306,7 @@ io.on('connection', (socket) => {
     if (!cleanTrack) return;
 
     rooms.playTrack(currentRoomId, cleanTrack);
+    getYoutubeAudioFormat(cleanTrack.id).catch(() => {});
     scheduleAutoAdvance(currentRoomId);
     io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
     io.to(currentRoomId).emit('track-changed', {
