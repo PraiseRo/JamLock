@@ -1,6 +1,11 @@
 // Frontend Client Orchestrator with Sub-second Drift Correction
 const socket = io({
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'],
+  reconnection: true,
+  reconnectionDelay: 800,
+  reconnectionDelayMax: 8000,
+  randomizationFactor: 0.5,
+  reconnectionAttempts: 50
 });
 
 // Global HTML Escaper
@@ -615,6 +620,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
             quickJoinForm?.addEventListener('submit', (ev) => {
               ev.preventDefault();
+              primeNativeAudioForMobile();
               const chosenName = quickJoinUsername?.value.trim() || getRandomNickname();
               localStorage.setItem('jamlock_username', chosenName);
               if (usernameInput) usernameInput.value = chosenName;
@@ -664,9 +670,39 @@ function generateRoomCode() {
   return `${p1}-${p2}`;
 }
 
+// Synchronously prime and unlock the native <audio> element during a direct user tap
+// so iOS Safari and Android Chrome grant background audio & MediaSession permissions
+let nativeAudioPrimed = false;
+const SILENT_WAV_DATA_URI = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+
+function primeNativeAudioForMobile() {
+  if (!nativeAudio || nativeAudioPrimed) return;
+  try {
+    const hasRealTrack = nativeAudio.src && nativeAudio.src.includes('/api/audio/');
+    if (!hasRealTrack) {
+      nativeAudio.src = SILENT_WAV_DATA_URI;
+      const p = nativeAudio.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => {
+          nativeAudioPrimed = true;
+          // Only pause the silent primer if a real track hasn't replaced it in the meantime
+          if (nativeAudio.src === SILENT_WAV_DATA_URI) {
+            nativeAudio.pause();
+          }
+        }).catch(() => {});
+      } else {
+        nativeAudioPrimed = true;
+      }
+    } else {
+      nativeAudioPrimed = true;
+    }
+  } catch (e) {}
+}
+
 createRoomBtn?.addEventListener('click', () => {
   const username = requireValidUsername();
   if (!username) return;
+  primeNativeAudioForMobile();
   const generatedCode = generateRoomCode();
   joinRoom(generatedCode, username, true);
 });
@@ -690,6 +726,7 @@ joinRoomBtn?.addEventListener('click', () => {
     joinCodeInput?.focus();
     return;
   }
+  primeNativeAudioForMobile();
   joinRoom(code, username, false);
 });
 
@@ -734,6 +771,16 @@ function joinRoom(roomId, explicitUsername, isCreating = false, pin = null) {
       showToast(`Connected to room ${roomId}`, 'success');
     } else if (response?.error) {
       document.documentElement.classList.remove('in-room-loading');
+      if (response.code === 'name_taken' || response.error?.toLowerCase().includes('already taken')) {
+        showToast(response.error, 'error');
+        if (response.suggestion) {
+          if (usernameInput) usernameInput.value = response.suggestion;
+          if (quickJoinUsername) quickJoinUsername.value = response.suggestion;
+          localStorage.setItem('jamlock_username', response.suggestion);
+          showToast(`Suggested: "${response.suggestion}". Click join to confirm.`, 'info');
+        }
+        return;
+      }
       if (response.error.toLowerCase().includes('pin')) {
         const userPin = prompt('This room is private. Please enter the room PIN:');
         if (userPin) {
@@ -1002,7 +1049,7 @@ async function probeAudioEndpoint(trackId) {
 // that case is handled by the "Tap to Tune In" prompt.
 let nativeAudioFailed = false;
 let nativeStallTimer = null;
-const NATIVE_STALL_MS = isMobileClient ? 2500 : 4000;
+const NATIVE_STALL_MS = isMobileClient ? 8000 : 5500;
 
 function disarmNativeStallWatchdog() {
   if (nativeStallTimer) {
@@ -1072,8 +1119,11 @@ if (nativeAudio) {
   // Automatic fallback to YouTube IFrame if direct stream ever errors
   nativeAudio.addEventListener('error', () => {
     if (activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
+    if (nativeAudio.src === SILENT_WAV_DATA_URI) return;
     const mediaErr = nativeAudio.error;
     const labels = { 1: 'ABORTED', 2: 'NETWORK', 3: 'DECODE', 4: 'SRC_NOT_SUPPORTED' };
+    // Ignore code 1 (ABORTED) caused by track switching or priming replacement
+    if (mediaErr?.code === 1) return;
     audioLog('audio:ERROR', {
       code: mediaErr?.code,
       label: labels[mediaErr?.code] || 'unknown',
@@ -1085,15 +1135,26 @@ if (nativeAudio) {
     fallbackToYouTubeTrack(currentRoom, 'native-audio-error');
   });
 
-  // If mobile OS briefly pauses audio during app-switch or screen-lock transition while room is playing, resume
+  // If mobile OS briefly pauses audio during app-switch or tab-switch transition while room is playing, resume
+  // Note: iOS/Android often fire `pause` a few ms BEFORE `document.hidden` flips to true during a swipe gesture.
   nativeAudio.addEventListener('pause', () => {
     if (activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
-    if (currentRoom.playback?.isPlaying && !nativeAudio.ended && document.hidden) {
-      setTimeout(() => {
-        if (activeEngine === 'audio' && currentRoom?.playback?.isPlaying && nativeAudio.paused) {
-          nativeAudio.play().catch(() => {});
-        }
-      }, 120);
+    if (nativeAudio.src === SILENT_WAV_DATA_URI) return;
+    if (currentRoom.playback?.isPlaying && !nativeAudio.ended) {
+      [80, 350].forEach((delayMs) => {
+        setTimeout(() => {
+          if (
+            activeEngine === 'audio' &&
+            currentRoom?.currentTrack &&
+            currentRoom?.playback?.isPlaying &&
+            nativeAudio.paused &&
+            !nativeAudio.ended &&
+            nativeAudio.src !== SILENT_WAV_DATA_URI
+          ) {
+            nativeAudio.play().catch(() => {});
+          }
+        }, delayMs);
+      });
     }
   });
 }
@@ -1285,6 +1346,15 @@ function startSyncEngine() {
     const handleVisibilityOrReturn = () => {
       if (document.hidden) {
         if (syncInterval) clearInterval(syncInterval);
+        // If mobile browser paused <audio> on tab/app hide, immediately kick it back on
+        if (currentRoom?.currentTrack && currentRoom.playback?.isPlaying) {
+          if (activeEngine === 'audio' && nativeAudio && nativeAudio.paused && !nativeAudio.ended) {
+            nativeAudio.play().catch(() => {});
+          }
+          if ('mediaSession' in navigator) {
+            try { navigator.mediaSession.playbackState = 'playing'; } catch (e) {}
+          }
+        }
         // Keep a light 1.5s sync check for background <audio> drift
         syncInterval = setInterval(runSyncTick, 1500);
       } else {
@@ -1386,6 +1456,11 @@ function loadCurrentTrack(room) {
   settlePending = true;
   lastSeekAt = Date.now(); // no drift seeks while the new track is loading
   ++loadRequestToken;
+
+  // Give every new track on mobile a fresh chance at native <audio> so one transient error never disables background play forever
+  if (isMobileClient) {
+    nativeAudioFailed = false;
+  }
 
   updateMediaSessionMetadata(track);
   syncWakeLock(Boolean(room.playback?.isPlaying));
@@ -1521,6 +1596,9 @@ function tuneIntoLiveRoom() {
 // Any first user gesture can unlock playback and un-mute if the room is playing.
 // Calls tuneIntoLiveRoom() to guarantee instant drift-free alignment.
 const unlockAudioOnGesture = () => {
+  if (isMobileClient && !nativeAudioPrimed) {
+    primeNativeAudioForMobile();
+  }
   if (currentRoom?.currentTrack && currentRoom?.playback?.isPlaying) {
     const isPaused = activeEngine === 'audio'
       ? (nativeAudio?.paused || !nativeAudio?.src)
@@ -2289,6 +2367,36 @@ socket.on('username-changed', ({ username }) => {
   showToast(`Your name is now "${username}"`, 'success');
 });
 
+socket.on('join-error', (err) => {
+  if (err?.code === 'name_taken') {
+    showToast(err.message, 'error');
+    if (usernameInput && err.suggestion) {
+      usernameInput.value = err.suggestion;
+      localStorage.setItem('jamlock_username', err.suggestion);
+      showToast(`Suggested: "${err.suggestion}" (click join to accept)`, 'info');
+    }
+  } else {
+    showToast(err?.message || 'Failed to join room', 'error');
+  }
+});
+
+socket.on('rename-error', (err) => {
+  if (err?.code === 'name_taken') {
+    showToast(err.message, 'error');
+    if (err.suggestion) {
+      showToast(`Name taken. Suggested: "${err.suggestion}"`, 'info');
+    }
+  } else {
+    showToast(err?.message || 'Could not update username', 'error');
+  }
+});
+
+socket.on('room-not-found', ({ roomId, message }) => {
+  showToast(message || `Room "${roomId}" not found or expired.`, 'error');
+  localStorage.removeItem('jamlock_current_room');
+  leaveRoom();
+});
+
 // Member list interactive actions (Rename self & Host-Kick moderation)
 if (usersStrip) {
   usersStrip.addEventListener('click', (e) => {
@@ -2586,25 +2694,6 @@ function appendChatMessage(msg) {
   chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
-function appendReactionChat(username, emoji) {
-  const emojiNames = { '🔥': 'fire', '❤️': 'love', '⚡': 'energy', '✨': 'sparkles' };
-  const name = emojiNames[emoji] || 'good vibes';
-  const div = document.createElement('div');
-  div.style.alignSelf = 'center';
-  div.style.fontSize = '12px';
-  div.style.color = 'var(--text-muted)';
-  div.style.background = 'var(--surface-raised)';
-  div.style.borderRadius = '999px';
-  div.style.padding = '4px 12px';
-  div.textContent = `${username} reacted with ${name}`;
-  chatMessages.appendChild(div);
-  // Cap chat DOM to 50 messages to prevent unbounded DOM memory growth
-  while (chatMessages.children.length > 50) {
-    chatMessages.removeChild(chatMessages.firstChild);
-  }
-  chatMessages.scrollTop = chatMessages.scrollHeight;
-}
-
 function showToast(message, type = 'info') {
   const container = document.getElementById('toast-container');
   if (!container) return;
@@ -2694,3 +2783,12 @@ document.querySelectorAll('.sample-chip, .quick-search-btn').forEach((btn) => {
     }
   });
 });
+
+// Register Service Worker for PWA App Shell Caching & Fast Cold Starts
+if ('serviceWorker' in navigator && window.location.protocol.startsWith('http')) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch((err) => {
+      console.warn('Service worker registration failed:', err);
+    });
+  });
+}

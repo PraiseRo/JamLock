@@ -1,6 +1,7 @@
 // Direct YouTube Audio Stream Resolver & Byte-Range Proxy for Mobile Background Playback
-// Uses @distube/ytdl-core (Ytdl) to extract native audio/mp4 (itag 140) streams so
-// iOS Safari & Android Chrome keep <audio> playing when switching apps or locking the screen.
+// Uses @distube/ytdl-core (Tier 1) + Piped API / Invidious API fallbacks (Tier 2 & 3) to extract
+// native audio/mp4 (itag 140) streams so iOS Safari & Android Chrome keep <audio> playing
+// when switching tabs, switching apps, or locking the screen—even on cloud datacenter IPs.
 
 import { Ytdl, chooseFormat } from '@distube/ytdl-core';
 import { Readable } from 'stream';
@@ -13,12 +14,25 @@ const FORMAT_TTL_MS = 1000 * 60 * 20;
 const FORMAT_MAX = 400;
 const INFLIGHT = new Map();
 
-// Never let a slow/blocked YouTube request hang the client forever
-const GETINFO_TIMEOUT_MS = 7000;     // max time to extract stream info
-const UPSTREAM_TIMEOUT_MS = 10000;   // max time to first byte from googlevideo
-// Remember recent failures so retries/probes fail instantly instead of hanging again
+// Timeouts & fast failure recovery
+const YTDL_TIMEOUT_MS = 4500;        // max time for Tier 1 ytdl-core
+const FALLBACK_API_TIMEOUT_MS = 4500; // max time for Tier 2/3 Piped/Invidious fallback
+const UPSTREAM_TIMEOUT_MS = 10000;   // max time to first byte from upstream media server
 const FAIL_CACHE = new Map();
-const FAIL_TTL_MS = 1000 * 60;
+const FAIL_TTL_MS = 1000 * 15;       // 15s cooldown on complete failure (was 60s)
+
+const PIPED_INSTANCES = [
+  'https://pipedapi.kavin.rocks',
+  'https://api.piped.private.coffee',
+  'https://pipedapi.tokhmi.xyz',
+  'https://pipedapi.moomoo.me'
+];
+
+const INVIDIOUS_INSTANCES = [
+  'https://inv.nadeko.net',
+  'https://invidious.nerdvpn.de',
+  'https://yewtu.be'
+];
 
 function withTimeout(promise, ms, label) {
   let timer;
@@ -35,80 +49,186 @@ function markFailed(videoId) {
   FAIL_CACHE.set(videoId, Date.now());
 }
 
-export async function getYoutubeAudioFormat(videoId) {
+async function extractViaYtdl(videoId) {
+  const info = await withTimeout(ytdl.getInfo(videoId), YTDL_TIMEOUT_MS, 'ytdl.getInfo');
+  const formats = Array.isArray(info?.formats) ? info.formats : [];
+
+  // Prefer itag 140 (audio/mp4 AAC) — universally supported on iOS Safari AND Android Chrome
+  const m4a140 = formats.find((f) => f.itag === 140 && f.url);
+  const anyMp4Audio = formats
+    .filter((f) => f.url && f.mimeType?.startsWith('audio/mp4'))
+    .sort((a, b) => (b.audioBitrate || b.bitrate || 0) - (a.audioBitrate || a.bitrate || 0))[0];
+  const fallbackAudio = formats
+    .filter((f) => f.url && f.mimeType?.startsWith('audio/'))
+    .sort((a, b) => (b.audioBitrate || b.bitrate || 0) - (a.audioBitrate || a.bitrate || 0))[0];
+
+  const chosen = m4a140 || anyMp4Audio || fallbackAudio || chooseFormat(formats, { quality: 'highestaudio', filter: 'audioonly' });
+  if (!chosen?.url) {
+    throw new Error(`no playable ytdl audio format (${formats.length} formats)`);
+  }
+
+  return {
+    url: chosen.url,
+    mimeType: (chosen.mimeType || 'audio/mp4').split(';')[0].trim(),
+    contentLength: Number(chosen.contentLength) || 0,
+    itag: chosen.itag || 140,
+    provider: 'ytdl'
+  };
+}
+
+async function extractViaPiped(videoId) {
+  const attempts = PIPED_INSTANCES.map(async (base) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FALLBACK_API_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${base}/streams/${encodeURIComponent(videoId)}`, {
+        headers: {
+          'user-agent': 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+          'accept': 'application/json'
+        },
+        signal: controller.signal
+      });
+      if (!res.ok) throw new Error(`Piped ${base} HTTP ${res.status}`);
+      const json = await res.json();
+      const streams = Array.isArray(json?.audioStreams) ? json.audioStreams : [];
+      const m4a = streams
+        .filter((s) => s.url && (s.mimeType?.startsWith('audio/mp4') || s.format === 'M4A'))
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      const anyAudio = streams
+        .filter((s) => s.url && s.mimeType?.startsWith('audio/'))
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      const chosen = m4a || anyAudio;
+      if (!chosen?.url) throw new Error(`Piped ${base} no audioStreams`);
+      return {
+        url: chosen.url,
+        mimeType: (chosen.mimeType || 'audio/mp4').split(';')[0].trim(),
+        contentLength: Number(chosen.contentLength) || 0,
+        itag: chosen.itag || 140,
+        provider: `piped:${new URL(base).hostname}`
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  return Promise.any(attempts);
+}
+
+async function extractViaInvidious(videoId) {
+  const attempts = INVIDIOUS_INSTANCES.map(async (base) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FALLBACK_API_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${base}/api/v1/videos/${encodeURIComponent(videoId)}`, {
+        headers: {
+          'user-agent': 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+          'accept': 'application/json'
+        },
+        signal: controller.signal
+      });
+      if (!res.ok) throw new Error(`Invidious ${base} HTTP ${res.status}`);
+      const json = await res.json();
+      const formats = Array.isArray(json?.adaptiveFormats) ? json.adaptiveFormats : [];
+      const m4a = formats
+        .filter((f) => f.url && f.type?.startsWith('audio/mp4'))
+        .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))[0];
+      const anyAudio = formats
+        .filter((f) => f.url && f.type?.startsWith('audio/'))
+        .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))[0];
+      const chosen = m4a || anyAudio;
+      if (!chosen?.url) throw new Error(`Invidious ${base} no adaptiveFormats`);
+
+      // Use Invidious instance's local proxy URL so datacenter IP blocks on googlevideo are bypassed
+      const proxiedUrl = `${base}/latest_version?id=${encodeURIComponent(videoId)}&itag=${encodeURIComponent(chosen.itag || 140)}&local=true`;
+      return {
+        url: proxiedUrl,
+        fallbackDirectUrl: chosen.url,
+        mimeType: (chosen.type || 'audio/mp4').split(';')[0].trim(),
+        contentLength: Number(chosen.clen) || 0,
+        itag: Number(chosen.itag) || 140,
+        provider: `invidious:${new URL(base).hostname}`
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  return Promise.any(attempts);
+}
+
+export async function getYoutubeAudioFormat(videoId, options = {}) {
   if (!videoId || !/^[\w-]{6,20}$/.test(videoId)) return null;
+  const { skipYtdl = false, forceRefresh = false } = options;
 
-  const cached = FORMAT_CACHE.get(videoId);
-  if (cached && Date.now() - cached.timestamp < FORMAT_TTL_MS) {
-    return cached.data;
+  if (!forceRefresh && !skipYtdl) {
+    const cached = FORMAT_CACHE.get(videoId);
+    if (cached && Date.now() - cached.timestamp < FORMAT_TTL_MS) {
+      return cached.data;
+    }
+
+    const failedAt = FAIL_CACHE.get(videoId);
+    if (failedAt && Date.now() - failedAt < FAIL_TTL_MS) {
+      return null;
+    }
   }
 
-  const failedAt = FAIL_CACHE.get(videoId);
-  if (failedAt && Date.now() - failedAt < FAIL_TTL_MS) {
-    console.warn(`[audio] extract skipped id=${videoId}: failed recently (cached ${Math.round((Date.now() - failedAt) / 1000)}s ago)`);
-    return null;
-  }
-
-  if (INFLIGHT.has(videoId)) {
-    return INFLIGHT.get(videoId);
+  const inflightKey = `${videoId}:${skipYtdl ? 'fallback' : 'full'}`;
+  if (INFLIGHT.has(inflightKey)) {
+    return INFLIGHT.get(inflightKey);
   }
 
   const promise = (async () => {
     const startedAt = Date.now();
-    try {
-      const info = await withTimeout(ytdl.getInfo(videoId), GETINFO_TIMEOUT_MS, 'getInfo');
-      const formats = Array.isArray(info?.formats) ? info.formats : [];
+    let data = null;
+    const errors = [];
 
-      // Prefer itag 140 (audio/mp4 AAC) — universally supported on iOS Safari AND Android Chrome
-      const m4a140 = formats.find((f) => f.itag === 140 && f.url);
-      const anyMp4Audio = formats
-        .filter((f) => f.url && f.mimeType?.startsWith('audio/mp4'))
-        .sort((a, b) => (b.audioBitrate || b.bitrate || 0) - (a.audioBitrate || a.bitrate || 0))[0];
-      const fallbackAudio = formats
-        .filter((f) => f.url && f.mimeType?.startsWith('audio/'))
-        .sort((a, b) => (b.audioBitrate || b.bitrate || 0) - (a.audioBitrate || a.bitrate || 0))[0];
-
-      const chosen = m4a140 || anyMp4Audio || fallbackAudio || chooseFormat(formats, { quality: 'highestaudio', filter: 'audioonly' });
-      if (!chosen?.url) {
-        console.warn(`[audio] extract FAILED id=${videoId} after ${Date.now() - startedAt}ms: no playable audio format (${formats.length} formats)`);
-        markFailed(videoId);
-        return null;
+    // Tier 1: @distube/ytdl-core (unless skipped after a 403 upstream rejection)
+    if (!skipYtdl) {
+      try {
+        data = await extractViaYtdl(videoId);
+      } catch (err) {
+        errors.push(`ytdl: ${err?.message || err}`);
       }
+    }
 
-      const data = {
-        url: chosen.url,
-        mimeType: (chosen.mimeType || 'audio/mp4').split(';')[0].trim(),
-        contentLength: Number(chosen.contentLength) || 0,
-        itag: chosen.itag
-      };
+    // Tier 2 & 3: Race Piped and Invidious fallback extractors if Tier 1 failed or was skipped
+    if (!data) {
+      try {
+        data = await Promise.any([
+          extractViaPiped(videoId),
+          extractViaInvidious(videoId)
+        ]);
+      } catch (err) {
+        errors.push(`fallbacks: ${err?.message || err}`);
+      }
+    }
 
+    if (data?.url) {
       if (FORMAT_CACHE.size >= FORMAT_MAX) {
         const oldest = FORMAT_CACHE.keys().next().value;
         FORMAT_CACHE.delete(oldest);
       }
       FORMAT_CACHE.set(videoId, { data, timestamp: Date.now() });
       FAIL_CACHE.delete(videoId);
-      console.log(`[audio] extract ok id=${videoId} itag=${data.itag} in ${Date.now() - startedAt}ms`);
+      console.log(`[audio] extract ok id=${videoId} provider=${data.provider} itag=${data.itag} in ${Date.now() - startedAt}ms`);
       return data;
-    } catch (err) {
-      // Real reason stays in server logs only (never sent to clients)
-      const isTimeout = /timeout/i.test(err?.message || '');
-      console.warn(`[audio] extract ${isTimeout ? 'TIMEOUT' : 'FAILED'} id=${videoId} after ${Date.now() - startedAt}ms: ${err?.message || err}`);
-      markFailed(videoId);
-      return null;
-    } finally {
-      INFLIGHT.delete(videoId);
     }
-  })();
 
-  INFLIGHT.set(videoId, promise);
+    console.warn(`[audio] extract FAILED id=${videoId} after ${Date.now() - startedAt}ms (${errors.join(' | ')})`);
+    markFailed(videoId);
+    return null;
+  })().finally(() => {
+    INFLIGHT.delete(inflightKey);
+  });
+
+  INFLIGHT.set(inflightKey, promise);
   return promise;
 }
 
 // Proxy audio stream with full HTTP 206 Byte-Range support for iOS Safari & Android lock-screen seeking
 export async function streamAudioToClient(req, res) {
   const videoId = String(req.params.videoId || '').trim();
-  const format = await getYoutubeAudioFormat(videoId);
+  let format = await getYoutubeAudioFormat(videoId);
 
   if (!format || !format.url) {
     console.warn(`[audio] stream 404 id=${videoId}: no format (extraction failed)`);
@@ -130,7 +250,6 @@ export async function streamAudioToClient(req, res) {
     try { abortController.abort(); } catch (e) {}
   });
 
-  // Each upstream fetch gets its own time-to-first-byte limit (cleared once headers arrive)
   let timedOut = false;
   const fetchUpstream = async (url) => {
     const timer = setTimeout(() => {
@@ -138,7 +257,7 @@ export async function streamAudioToClient(req, res) {
       try { abortController.abort(); } catch (e) {}
     }, UPSTREAM_TIMEOUT_MS);
     try {
-      return await fetch(url, { headers: upstreamHeaders, signal: abortController.signal });
+      return await fetch(url, { headers: upstreamHeaders, signal: abortController.signal, redirect: 'follow' });
     } finally {
       clearTimeout(timer);
     }
@@ -147,16 +266,17 @@ export async function streamAudioToClient(req, res) {
   try {
     let upstreamRes = await fetchUpstream(format.url);
 
-    // If cached googlevideo URL expired (403/410), refresh once and retry
-    if (upstreamRes.status === 403 || upstreamRes.status === 410) {
-      console.warn(`[audio] upstream ${upstreamRes.status} id=${videoId}: refreshing URL and retrying once`);
+    // If ytdl googlevideo URL is IP-blocked (403/410) or upstream failed, immediately switch to Tier 2/3 fallback proxy
+    if (!upstreamRes.ok && upstreamRes.status !== 206) {
+      console.warn(`[audio] upstream ${upstreamRes.status} from ${format.provider} id=${videoId}: switching to fallback stream`);
       FORMAT_CACHE.delete(videoId);
-      const fresh = await getYoutubeAudioFormat(videoId);
-      if (fresh?.url) {
-        upstreamRes = await fetchUpstream(fresh.url);
-        console.warn(`[audio] retry result id=${videoId}: upstream ${upstreamRes.status}`);
-      } else {
-        console.warn(`[audio] retry aborted id=${videoId}: re-extraction failed`);
+      const fallbackFormat = await getYoutubeAudioFormat(videoId, {
+        skipYtdl: format.provider === 'ytdl',
+        forceRefresh: true
+      });
+      if (fallbackFormat?.url) {
+        format = fallbackFormat;
+        upstreamRes = await fetchUpstream(format.url);
       }
     }
 
@@ -212,7 +332,7 @@ export async function resolveAudioStream({ videoId }) {
     return {
       mode: 'audio',
       url: `/api/audio/${encodeURIComponent(videoId)}`,
-      source: 'ytdl-m4a-proxy'
+      source: format.provider || 'ytdl-m4a-proxy'
     };
   }
   return { mode: 'iframe', url: null, source: 'yt-iframe' };

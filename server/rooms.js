@@ -3,13 +3,20 @@
 class RoomManager {
   constructor() {
     this.rooms = new Map();
-    // Background periodic sweep for abandoned empty rooms (runs every 5 min)
+    // Background periodic sweep for abandoned empty rooms (runs every 60s, 30m TTL)
     setInterval(() => {
-      this.cleanupExpiredRooms();
-    }, 5 * 60 * 1000);
+      this.cleanupExpiredRooms(30 * 60 * 1000);
+    }, 60 * 1000);
   }
 
-  cleanupExpiredRooms(emptyTtlMs = 10 * 60 * 1000) {
+  touch(roomId) {
+    const room = this.getRoom(roomId);
+    if (room) {
+      room.lastActivityAt = Date.now();
+    }
+  }
+
+  cleanupExpiredRooms(emptyTtlMs = 30 * 60 * 1000) {
     const now = Date.now();
     for (const [roomId, room] of this.rooms.entries()) {
       if (room.users.size === 0) {
@@ -18,6 +25,8 @@ class RoomManager {
         } else if (now - room.emptySince >= emptyTtlMs) {
           this.rooms.delete(roomId);
         }
+      } else {
+        room.emptySince = null;
       }
     }
   }
@@ -28,6 +37,7 @@ class RoomManager {
       this.rooms.set(id, {
         id,
         createdAt: Date.now(),
+        lastActivityAt: Date.now(),
         emptySince: null,
         users: new Map(), // socketId -> { id, username, isHost, avatarColor }
         currentTrack: null, // { id, title, artist, duration, durationSeconds, thumbnail, addedBy }
@@ -108,23 +118,38 @@ class RoomManager {
     const avatarColor = colors[Math.floor(Math.random() * colors.length)];
 
     let baseUsername = (username || `Guest #${Math.floor(1000 + Math.random() * 9000)}`).trim();
-    // Disambiguate duplicate display names in the same room (e.g. Alex, Alex #2)
-    const existingNames = new Set(Array.from(room.users.values()).map(u => u.username?.toLowerCase()));
-    let finalUsername = baseUsername;
-    let counter = 2;
-    while (existingNames.has(finalUsername.toLowerCase())) {
-      finalUsername = `${baseUsername} #${counter++}`;
+    // Reject duplicate display names in the same room with an intelligent suggestion
+    let nameConflict = false;
+    for (const u of room.users.values()) {
+      if (u.clientId !== resolvedClientId && u.username && u.username.toLowerCase() === baseUsername.toLowerCase()) {
+        nameConflict = true;
+        break;
+      }
+    }
+
+    if (nameConflict) {
+      const existingLower = new Set(Array.from(room.users.values()).map(u => (u.username || '').toLowerCase()));
+      let k = 2;
+      while (existingLower.has(`${baseUsername.toLowerCase()} (${k})`)) {
+        k++;
+      }
+      return {
+        error: 'name_taken',
+        message: `Display name "${baseUsername}" is already taken in this room.`,
+        suggestion: `${baseUsername} (${k})`
+      };
     }
 
     const user = {
       clientId: resolvedClientId,
-      username: finalUsername,
+      username: baseUsername,
       isHost: isFirstUser,
       avatarColor,
       sockets: new Set([socketId]),
       joinedAt: Date.now()
     };
 
+    room.lastActivityAt = Date.now();
     room.users.set(socketId, user);
     return { room, user, isNewUser: true };
   }
@@ -387,25 +412,30 @@ class RoomManager {
 
   changeUsername(roomId, socketId, newUsername) {
     const room = this.getRoom(roomId);
-    if (!room) return null;
+    if (!room) return { error: 'room_not_found', message: 'Room not found' };
     const user = room.users.get(socketId);
-    if (!user) return null;
+    if (!user) return { error: 'user_not_found', message: 'User not found in room' };
 
     const clean = String(newUsername || '').trim().slice(0, 25);
-    if (!clean) return null;
+    if (!clean) return { error: 'invalid_name', message: 'Display name cannot be empty' };
 
-    const existingNames = new Set(
-      Array.from(room.users.values())
-        .filter(u => u.clientId !== user.clientId)
-        .map(u => u.username?.toLowerCase())
-    );
-    let finalName = clean;
-    let counter = 2;
-    while (existingNames.has(finalName.toLowerCase())) {
-      finalName = `${clean} #${counter++}`;
+    for (const u of room.users.values()) {
+      if (u.clientId !== user.clientId && u.username && u.username.toLowerCase() === clean.toLowerCase()) {
+        const existingLower = new Set(Array.from(room.users.values()).map(x => (x.username || '').toLowerCase()));
+        let k = 2;
+        while (existingLower.has(`${clean.toLowerCase()} (${k})`)) {
+          k++;
+        }
+        return {
+          error: 'name_taken',
+          message: `Display name "${clean}" is already taken in this room.`,
+          suggestion: `${clean} (${k})`
+        };
+      }
     }
 
-    user.username = finalName;
+    user.username = clean;
+    this.touch(roomId);
     return { room, user };
   }
 

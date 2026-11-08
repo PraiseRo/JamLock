@@ -1110,6 +1110,7 @@ button:focus-visible, input:focus-visible {
     height: 100vh !important;
     height: 100dvh !important;
     max-height: 100vh !important;
+    max-height: 100dvh !important;
     overflow: hidden !important;
     display: flex !important;
     flex-direction: column !important;
@@ -1169,6 +1170,7 @@ button:focus-visible, input:focus-visible {
     max-width: 100% !important;
     padding: 0 28px !important;
     max-height: calc(100vh - 72px) !important;
+    max-height: calc(100dvh - 72px) !important;
   }
 
   .dashboard-card {

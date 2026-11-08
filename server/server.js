@@ -184,62 +184,128 @@ function scheduleAutoAdvance(roomId) {
   }, remainingSec * 1000 + 800);
 }
 
-// Lightweight In-Memory Sliding Window Rate Limiter for /api/search
-// 35 requests per 60 seconds per IP
-const searchRateLimits = new Map();
-const SEARCH_WINDOW_MS = 60 * 1000;
-const SEARCH_MAX_REQ = 35;
+// --- PER-IP TOKEN BUCKET RATE LIMITER & SERVER SEARCH CACHE ---
+// 20 requests per minute per IP token bucket
+class SearchTokenBucket {
+  constructor(capacity = 20, fillPerMinute = 20) {
+    this.capacity = capacity;
+    this.tokens = capacity;
+    this.fillRate = fillPerMinute / 60000; // tokens per millisecond
+    this.lastFill = Date.now();
+  }
 
-function isSearchRateLimited(ip) {
-  const now = Date.now();
-  let record = searchRateLimits.get(ip);
-  if (!record || now - record.resetTime > SEARCH_WINDOW_MS) {
-    record = { count: 1, resetTime: now };
-    searchRateLimits.set(ip, record);
-    return false;
+  tryConsume(count = 1) {
+    const now = Date.now();
+    const elapsed = Math.max(0, now - this.lastFill);
+    this.tokens = Math.min(this.capacity, this.tokens + elapsed * this.fillRate);
+    this.lastFill = now;
+
+    const remaining = Math.max(0, Math.floor(this.tokens));
+    const resetSec = Math.max(1, Math.ceil((this.capacity - this.tokens) / (this.fillRate * 1000)));
+
+    if (this.tokens >= count) {
+      this.tokens -= count;
+      return {
+        allowed: true,
+        remaining: Math.max(0, Math.floor(this.tokens)),
+        resetSec
+      };
+    }
+
+    const retryAfterSec = Math.max(1, Math.ceil((count - this.tokens) / (this.fillRate * 1000)));
+    return {
+      allowed: false,
+      remaining: 0,
+      resetSec,
+      retryAfterSec
+    };
   }
-  record.count++;
-  if (record.count > SEARCH_MAX_REQ) {
-    return true;
-  }
-  return false;
 }
 
-// Prune stale IP rate limit records every 10 minutes
+const searchBuckets = new Map();
+function checkSearchRateLimit(ip) {
+  let bucket = searchBuckets.get(ip);
+  if (!bucket) {
+    bucket = new SearchTokenBucket(20, 20);
+    searchBuckets.set(ip, bucket);
+  }
+  return bucket.tryConsume(1);
+}
+
+// Prune inactive IP buckets every 10 minutes
 setInterval(() => {
   const now = Date.now();
-  for (const [ip, record] of searchRateLimits.entries()) {
-    if (now - record.resetTime > SEARCH_WINDOW_MS) {
-      searchRateLimits.delete(ip);
+  for (const [ip, bucket] of searchBuckets.entries()) {
+    if (now - bucket.lastFill > 10 * 60 * 1000) {
+      searchBuckets.delete(ip);
     }
   }
 }, 10 * 60 * 1000);
 
-// API: Instant Fast Search with Cache + Predictive Background Stream Warmup
+// In-Memory Server Response Cache (5-minute TTL)
+const SERVER_SEARCH_CACHE = new Map();
+const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of SERVER_SEARCH_CACHE.entries()) {
+    if (now >= entry.expiresAt) {
+      SERVER_SEARCH_CACHE.delete(key);
+    }
+  }
+}, 5 * 60 * 1000);
+
+// API: Instant Fast Search with Server Cache, Token Bucket, and Stream Warmup
 app.get('/api/search', async (req, res) => {
   const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
-  if (isSearchRateLimited(clientIp)) {
-    res.setHeader('Retry-After', '30');
+  const rateLimit = checkSearchRateLimit(clientIp);
+
+  res.setHeader('X-RateLimit-Limit', '20');
+  res.setHeader('X-RateLimit-Remaining', String(rateLimit.remaining));
+  res.setHeader('X-RateLimit-Reset', String(rateLimit.resetSec));
+
+  if (!rateLimit.allowed) {
+    res.setHeader('Retry-After', String(rateLimit.retryAfterSec));
     return res.status(429).json({ error: 'Too many search requests. Please slow down.' });
   }
 
-  const rawQuery = String(req.query.q || '').trim();
+  let rawQuery = String(req.query.q || '').trim();
   if (!rawQuery) {
     return res.json([]);
   }
-  // Clamp query to max 100 characters to prevent expensive string processing attacks
-  const query = rawQuery.slice(0, 100);
+  // Hard cap q length to 100 characters to prevent expensive string processing attacks
+  if (rawQuery.length > 100) {
+    rawQuery = rawQuery.slice(0, 100).trim();
+  }
 
+  const normalizedKey = rawQuery.toLowerCase();
+  res.setHeader('Cache-Control', 'public, max-age=60');
+
+  // Check Server Cache
+  const cached = SERVER_SEARCH_CACHE.get(normalizedKey);
+  if (cached && Date.now() < cached.expiresAt) {
+    res.setHeader('X-Cache', 'HIT');
+    return res.json(cached.results);
+  }
+
+  res.setHeader('X-Cache', 'MISS');
   const startTime = Date.now();
-  const results = await searchSongs(query);
+  const results = await searchSongs(rawQuery);
   const duration = Date.now() - startTime;
   res.setHeader('X-Response-Time-Ms', duration);
 
-  // Predictive background warmup for top results: user typically clicks top result within 1-3s
-  if (Array.isArray(results) && results.length > 0) {
-    getYoutubeAudioFormat(results[0].id).catch(() => {});
-    if (results.length > 1) {
-      getYoutubeAudioFormat(results[1].id).catch(() => {});
+  if (Array.isArray(results)) {
+    SERVER_SEARCH_CACHE.set(normalizedKey, {
+      results,
+      expiresAt: Date.now() + SEARCH_CACHE_TTL_MS
+    });
+
+    // Predictive background warmup for top results
+    if (results.length > 0) {
+      getYoutubeAudioFormat(results[0].id).catch(() => {});
+      if (results.length > 1) {
+        getYoutubeAudioFormat(results[1].id).catch(() => {});
+      }
     }
   }
 
@@ -336,16 +402,27 @@ io.on('connection', (socket) => {
     // Verify room existence if joining an existing room
     if (!isCreating && !rooms.hasRoom(cleanId)) {
       if (callback) {
-        callback({ success: false, error: `Room "${cleanId}" does not exist. Check the code or create a new room.` });
+        callback({ success: false, code: 'room_not_found', error: `Room "${cleanId}" does not exist or has expired.` });
       }
+      socket.emit('room-not-found', { roomId: cleanId, message: `Room "${cleanId}" does not exist or has expired.` });
       return;
     }
 
     const joinRes = rooms.addUser(cleanId, socket.id, cleanUsername, clientId, pin);
     if (joinRes?.error) {
       if (callback) {
-        callback({ success: false, error: joinRes.message || 'Access denied' });
+        callback({
+          success: false,
+          code: joinRes.error,
+          error: joinRes.message || 'Access denied',
+          suggestion: joinRes.suggestion
+        });
       }
+      socket.emit('join-error', {
+        code: joinRes.error,
+        message: joinRes.message || 'Access denied',
+        suggestion: joinRes.suggestion
+      });
       return;
     }
 
@@ -768,7 +845,14 @@ io.on('connection', (socket) => {
   socket.on('change-username', ({ newUsername }) => {
     if (!currentRoomId || !newUsername) return;
     const res = rooms.changeUsername(currentRoomId, socket.id, newUsername);
-    if (!res) return;
+    if (!res || res.error) {
+      socket.emit('rename-error', {
+        code: res?.error || 'error',
+        message: res?.message || 'Could not change username',
+        suggestion: res?.suggestion
+      });
+      return;
+    }
 
     const { room, user } = res;
     io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
@@ -858,10 +942,16 @@ app.get('/r/:roomId', (req, res) => {
       }
     }
 
+    const roomUrl = `https://jamlock.onrender.com/r/${roomId}`;
+    const ogType = (room && room.currentTrack) ? 'music.song' : 'website';
+
     html = html.replace(/<title>.*?<\/title>/, `<title>${title} | JamLock</title>`);
+    html = html.replace(/<meta property="og:type" content=".*?">/, `<meta property="og:type" content="${ogType}">`);
+    html = html.replace(/<meta property="og:url" content=".*?">/, `<meta property="og:url" content="${roomUrl}">`);
     html = html.replace(/<meta property="og:title" content=".*?">/, `<meta property="og:title" content="${title}">`);
     html = html.replace(/<meta property="og:description" content=".*?">/, `<meta property="og:description" content="${desc}">`);
     html = html.replace(/<meta property="og:image" content=".*?">/, `<meta property="og:image" content="${image}">`);
+    html = html.replace(/<meta name="twitter:url" content=".*?">/, `<meta name="twitter:url" content="${roomUrl}">`);
     html = html.replace(/<meta name="twitter:title" content=".*?">/, `<meta name="twitter:title" content="${title}">`);
     html = html.replace(/<meta name="twitter:description" content=".*?">/, `<meta name="twitter:description" content="${desc}">`);
     html = html.replace(/<meta name="twitter:image" content=".*?">/, `<meta name="twitter:image" content="${image}">`);
