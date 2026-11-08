@@ -150,8 +150,8 @@
           <span id="listening-count-display" class="data-on-load" style="font-size: 12px; color: var(--text-muted); margin-left: 2px"></span>
           <!-- Skeleton Shimmer for Badge during refresh -->
           <span class="skeleton-box skeleton-on-load" style="width: 65px; height: 14px; border-radius: 4px; display: none"></span>
-          <button id="copy-room-link-btn" class="ghost" title="Copy Invite Link" style="width: 24px; height: 24px; border-radius: 50%; border: 0; background: transparent; color: var(--text-main); display: flex; align-items: center; justify-content: center">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <button id="copy-room-link-btn" class="ghost" title="Share Invite Link" style="width: 28px; height: 28px; border-radius: 50%; border: 0; background: rgba(255,255,255,0.06); color: var(--lime); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.15s">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
           </button>
           <button id="host-settings-btn" class="ghost hidden" title="Room Host Settings" style="width: 24px; height: 24px; border-radius: 50%; border: 0; background: transparent; color: var(--text-muted); display: flex; align-items: center; justify-content: center">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -417,6 +417,38 @@
 
   <!-- TOAST NOTIFICATION CONTAINER -->
   <div id="toast-container" style="position: fixed; bottom: 24px; right: 24px; z-index: 50; display: flex; flex-direction: column; gap: 8px; pointer-events: none"></div>
+
+  <!-- GUEST QUICK JOIN MODAL (Shown when joining via invite link with no saved name) -->
+  <div id="quick-join-modal" class="hidden" style="position: fixed; inset: 0; z-index: 10000; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(5,5,8,0.88); backdrop-filter: blur(12px)">
+    <div class="card animate-scaleUp" style="max-width: 400px; width: 100%; padding: 28px; border: 1px solid var(--border-focus); box-shadow: 0 12px 48px rgba(0,0,0,0.8), 0 0 32px rgba(200,255,61,0.15)">
+      <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px">
+        <span style="font-size: 24px">🎧</span>
+        <h3 style="margin: 0; font-size: 18px; font-weight: 700; color: var(--text-main)">You've been invited!</h3>
+      </div>
+      <p style="margin: 0 0 20px; font-size: 13px; color: var(--text-secondary)">
+        Join listening room <strong id="quick-join-room-code" class="mono" style="color: var(--lime); font-size: 14px"></strong> in real-time. Choose your name below:
+      </p>
+
+      <form id="quick-join-form" style="display: flex; flex-direction: column; gap: 14px">
+        <div>
+          <label style="display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px">
+            Your Display Name
+          </label>
+          <div style="position: relative; display: flex; align-items: center">
+            <input id="quick-join-username" type="text" maxlength="20" required style="width: 100%; padding: 12px 42px 12px 14px; font-size: 14px; font-weight: 600; border-radius: var(--radius-sm); border: 1px solid var(--border-ctrl); background: var(--surface-low); color: var(--text-main); outline: none" placeholder="Choose a name">
+            <button id="quick-join-randomize-btn" type="button" title="Generate random name" style="position: absolute; right: 10px; background: none; border: 0; color: var(--text-muted); cursor: pointer; font-size: 16px; padding: 4px; display: flex; align-items: center">
+              🎲
+            </button>
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary" style="height: 46px; font-size: 14px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 4px">
+          <span>Join Room Now</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+        </button>
+      </form>
+    </div>
+  </div>
 
   <!-- HOST PERMISSIONS MODAL -->
   <div id="settings-modal" class="hidden" style="position: fixed; inset: 0; z-index: 9999; display: none; align-items: center; justify-content: center; padding: 16px; background: rgba(0,0,0,0.85)">

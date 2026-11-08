@@ -99,32 +99,92 @@ function getAudioScore(rawTitle, artist) {
   return score;
 }
 
-// Deduplicate list of songs so only the single best audio version appears per song
-function deduplicateAudioTracks(tracks, limit = 8) {
+// Calculate Spotify-style relevance score (Title/Artist Token Disambiguation + Popularity + Official Audio Quality)
+function calculateSearchRelevance(track, query) {
+  const q = query.trim().toLowerCase();
+  const rawTitle = (track.title || '').toLowerCase();
+  const cleanT = cleanTitle(track.title).toLowerCase();
+  const artist = (track.artist || '').toLowerCase();
+  const queryTokens = q.split(/\s+/).filter((t) => t.length > 0);
+
+  let relevance = 0;
+
+  // 1. Exact Full Match
+  if (cleanT === q) {
+    relevance += 120; // Perfect match on title
+  } else if (cleanT.startsWith(q)) {
+    relevance += 60;
+  }
+
+  // 2. Token Disambiguation ("Song Artist" or "Artist Song")
+  // e.g. Query "beat ay" -> checks if "beat" in title and "ay" in artist
+  if (queryTokens.length > 1) {
+    let titleMatchedTokens = 0;
+    let artistMatchedTokens = 0;
+
+    for (const token of queryTokens) {
+      const inTitle = cleanT.includes(token);
+      const inArtist = artist.includes(token);
+
+      if (inTitle) titleMatchedTokens++;
+      if (inArtist) artistMatchedTokens++;
+    }
+
+    // Huge reward for multi-field cross matching
+    if (titleMatchedTokens > 0 && artistMatchedTokens > 0) {
+      relevance += 140; // Definite Artist + Title disambiguation
+    } else if (titleMatchedTokens === queryTokens.length) {
+      relevance += 80;  // All words match title
+    } else if (artistMatchedTokens === queryTokens.length) {
+      relevance += 70;  // All words match artist
+    }
+  } else if (queryTokens.length === 1) {
+    const singleToken = queryTokens[0];
+    if (artist === singleToken || artist.startsWith(singleToken)) {
+      relevance += 40;
+    }
+    if (cleanT.includes(singleToken)) {
+      relevance += 30;
+    }
+  }
+
+  // 3. Audio Quality & Official Topic Boost (from getAudioScore)
+  const audioScore = getAudioScore(track.title, track.artist);
+  relevance += audioScore;
+
+  return relevance;
+}
+
+// Deduplicate list of songs and sort by Spotify-style relevance ranking
+function deduplicateAudioTracks(tracks, query = '', limit = 8) {
   const songMap = new Map();
 
   for (const track of tracks) {
-    const score = getAudioScore(track.title, track.artist);
+    const audioScore = getAudioScore(track.title, track.artist);
     // Ignore heavy non-song junk
-    if (score <= -30) continue;
+    if (audioScore <= -30) continue;
 
+    const relevanceScore = calculateSearchRelevance(track, query);
     const key = getSongKey(track.title, track.artist);
     const existing = songMap.get(key);
 
     const candidate = {
       ...track,
       cleanTitle: cleanTitle(track.title),
-      score
+      relevanceScore
     };
 
-    if (!existing || candidate.score > existing.score) {
+    if (!existing || candidate.relevanceScore > existing.relevanceScore) {
       songMap.set(key, candidate);
     }
   }
 
+  // Sort candidates by final Spotify-style relevance score (highest first)
+  const sorted = Array.from(songMap.values()).sort((a, b) => b.relevanceScore - a.relevanceScore);
+
   // Convert to clean list, stripping internal score
-  return Array.from(songMap.values())
-    .map(({ score, ...cleanTrack }) => cleanTrack)
+  return sorted
+    .map(({ relevanceScore, ...cleanTrack }) => cleanTrack)
     .slice(0, limit);
 }
 
@@ -258,8 +318,8 @@ export async function searchSongs(query, limit = 12) {
     rawResults = await searchFallback(cleanQuery, 16);
   }
 
-  // Deduplicate and prioritize audio tracks over noisy video duplicates
-  const results = deduplicateAudioTracks(rawResults || [], limit);
+  // Deduplicate and prioritize audio tracks over noisy video duplicates using Spotify-style ranking
+  const results = deduplicateAudioTracks(rawResults || [], cleanQuery, limit);
 
   // Save to Cache
   if (results && results.length > 0) {

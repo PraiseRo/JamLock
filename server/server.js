@@ -57,6 +57,10 @@ async function advanceTrack(roomId) {
 
   if (room.queue.length > 0) {
     rooms.skipTrack(roomId);
+    // Pre-warm newly elevated track in queue
+    if (room.queue.length > 0) {
+      getYoutubeAudioFormat(room.queue[0].id).catch(() => {});
+    }
   } else if (room.settings?.autoSuggest && room.currentTrack) {
     const recommended = await getRecommendations(room.currentTrack, room.history);
     if (recommended) {
@@ -94,6 +98,21 @@ function scheduleAutoAdvance(roomId) {
 
   const remainingSec = Math.max(0, duration - rooms.getCurrentPosition(room));
   const trackId = room.currentTrack.id;
+
+  // Seamless queue transition: pre-warm upcoming queued track 25s before track ends
+  if (room.queue.length > 0) {
+    if (remainingSec <= 25) {
+      getYoutubeAudioFormat(room.queue[0].id).catch(() => {});
+    } else {
+      setTimeout(() => {
+        const curRoom = rooms.getRoom(roomId);
+        if (curRoom?.queue?.length > 0) {
+          getYoutubeAudioFormat(curRoom.queue[0].id).catch(() => {});
+        }
+      }, Math.max(500, (remainingSec - 25) * 1000));
+    }
+  }
+
   room.autoAdvanceTimer = setTimeout(() => {
     room.autoAdvanceTimer = null;
     // Only advance if the same track is still playing and someone is listening
@@ -103,7 +122,7 @@ function scheduleAutoAdvance(roomId) {
   }, remainingSec * 1000 + 800);
 }
 
-// API: Instant Fast Search with Cache
+// API: Instant Fast Search with Cache + Predictive Background Stream Warmup
 app.get('/api/search', async (req, res) => {
   const query = req.query.q;
   if (!query) {
@@ -113,7 +132,25 @@ app.get('/api/search', async (req, res) => {
   const results = await searchSongs(query);
   const duration = Date.now() - startTime;
   res.setHeader('X-Response-Time-Ms', duration);
+
+  // Predictive background warmup for top results: user typically clicks top result within 1-3s
+  if (Array.isArray(results) && results.length > 0) {
+    getYoutubeAudioFormat(results[0].id).catch(() => {});
+    if (results.length > 1) {
+      getYoutubeAudioFormat(results[1].id).catch(() => {});
+    }
+  }
+
   return res.json(results);
+});
+
+// API: Fast Stream Format Warmup (triggered on hover/focus)
+app.get('/api/warmup/:videoId', (req, res) => {
+  const videoId = req.params.videoId;
+  if (videoId) {
+    getYoutubeAudioFormat(videoId).catch(() => {});
+  }
+  res.status(204).end();
 });
 
 // API: Room info check
@@ -312,7 +349,7 @@ io.on('connection', (socket) => {
   });
 
   // Play immediately (Cover Click / Instant Play)
-  socket.on('play-now', ({ track }) => {
+  socket.on('play-now', async ({ track }) => {
     if (!currentRoomId || !track) return;
     const room = rooms.getRoom(currentRoomId);
     if (!room) return;
@@ -325,8 +362,21 @@ io.on('connection', (socket) => {
     const cleanTrack = sanitizeTrack(track, player?.username);
     if (!cleanTrack) return;
 
+    // Fast resolution check: if stream format is not yet cached, resolve format concurrently
+    // with a short 1.2s bounded race so the room playback clock starts precisely when the stream is ready
+    try {
+      await Promise.race([
+        getYoutubeAudioFormat(cleanTrack.id),
+        new Promise((resolve) => setTimeout(resolve, 1200))
+      ]);
+    } catch (e) {}
+
     rooms.playTrack(currentRoomId, cleanTrack);
-    getYoutubeAudioFormat(cleanTrack.id).catch(() => {});
+    // Background pre-warm next track in queue (if any)
+    if (room.queue.length > 0) {
+      getYoutubeAudioFormat(room.queue[0].id).catch(() => {});
+    }
+
     scheduleAutoAdvance(currentRoomId);
     io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
     io.to(currentRoomId).emit('track-changed', {

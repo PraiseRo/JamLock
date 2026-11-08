@@ -352,6 +352,27 @@ function syncAutoSuggestUI(enabled) {
 }
 
 // --- 4. ROOM RESTORATION & NAVIGATION ---
+function getRandomNickname() {
+  const vibes = ['Groovy', 'Neon', 'Cosmic', 'Hyper', 'Velvet', 'Electric', 'Funky', 'Sonic', 'Astral', 'Chill', 'Glitch', 'Retro', 'Bass'];
+  const icons = ['Fox', 'Panda', 'Tiger', 'Falcon', 'Vibe', 'Echo', 'Drifter', 'Nomad', 'Rhythm', 'Wave', 'Hawk', 'Otter', 'Rider'];
+  const num = Math.floor(Math.random() * 89) + 10;
+  return `${vibes[Math.floor(Math.random() * vibes.length)]}${icons[Math.floor(Math.random() * icons.length)]}${num}`;
+}
+
+const quickJoinModal = document.getElementById('quick-join-modal');
+const quickJoinForm = document.getElementById('quick-join-form');
+const quickJoinUsername = document.getElementById('quick-join-username');
+const quickJoinRoomCode = document.getElementById('quick-join-room-code');
+const quickJoinRandomizeBtn = document.getElementById('quick-join-randomize-btn');
+
+quickJoinRandomizeBtn?.addEventListener('click', () => {
+  if (quickJoinUsername) {
+    quickJoinUsername.value = getRandomNickname();
+    quickJoinUsername.focus();
+    quickJoinUsername.select();
+  }
+});
+
 window.addEventListener('DOMContentLoaded', () => {
   const urlParams = new URLSearchParams(window.location.search);
   const roomParam = urlParams.get('room');
@@ -388,8 +409,30 @@ window.addEventListener('DOMContentLoaded', () => {
       joinRoom(targetRoom.toUpperCase(), savedName);
     } else {
       document.documentElement.classList.remove('in-room-loading');
-      usernameInput?.focus();
-      showToast(`Enter your display name to enter room ${targetRoom.toUpperCase()}`, 'info');
+      // If arriving directly via ?room= invite link without a username, present Quick Join Modal
+      if (roomParam && quickJoinModal) {
+        if (quickJoinRoomCode) quickJoinRoomCode.textContent = targetRoom.toUpperCase();
+        if (quickJoinUsername) quickJoinUsername.value = getRandomNickname();
+        quickJoinModal.classList.remove('hidden');
+        quickJoinModal.style.display = 'flex';
+        setTimeout(() => {
+          quickJoinUsername?.focus();
+          quickJoinUsername?.select();
+        }, 150);
+
+        quickJoinForm?.addEventListener('submit', (ev) => {
+          ev.preventDefault();
+          const chosenName = quickJoinUsername?.value.trim() || getRandomNickname();
+          localStorage.setItem('jamlock_username', chosenName);
+          if (usernameInput) usernameInput.value = chosenName;
+          quickJoinModal.classList.add('hidden');
+          quickJoinModal.style.display = 'none';
+          joinRoom(targetRoom.toUpperCase(), chosenName);
+        });
+      } else {
+        usernameInput?.focus();
+        showToast(`Enter your display name to enter room ${targetRoom.toUpperCase()}`, 'info');
+      }
     }
   }
 });
@@ -515,9 +558,28 @@ confirmLeaveBtn?.addEventListener('click', () => {
   window.location.href = window.location.origin + window.location.pathname;
 });
 
-copyRoomLinkBtn?.addEventListener('click', () => {
-  navigator.clipboard.writeText(window.location.href);
-  showToast('Invite link copied! Share with friends.', 'success');
+copyRoomLinkBtn?.addEventListener('click', async () => {
+  const shareData = {
+    title: 'JamLock — Listen Together',
+    text: `Join my live music room (${currentRoom?.id || 'JamLock'})!`,
+    url: window.location.href
+  };
+
+  if (navigator.share && /mobile|android|iphone|ipad/i.test(navigator.userAgent)) {
+    try {
+      await navigator.share(shareData);
+      return;
+    } catch (e) {
+      if (e?.name === 'AbortError') return; // User closed share sheet
+    }
+  }
+
+  try {
+    await navigator.clipboard.writeText(window.location.href);
+    showToast('Invite link copied to clipboard! 📋', 'success');
+  } catch (err) {
+    showToast('Failed to copy link', 'error');
+  }
 });
 
 // --- 5. HOST SETTINGS MODAL ---
@@ -1351,6 +1413,9 @@ function fadeAudio(targetVolume, durationMs = 350, onComplete) {
 
 // --- 7. PLAYBACK CONTROLS ---
 playPauseBtn?.addEventListener('click', () => {
+  if (document.activeElement === playPauseBtn) {
+    playPauseBtn.blur();
+  }
   if (!currentRoom?.currentTrack) {
     showToast('Search a song below to start playing!', 'info');
     return;
@@ -1480,7 +1545,7 @@ function renderSearchResults(items) {
   searchResultsList.innerHTML = items.map((song) => {
     const songEncoded = encodeURIComponent(JSON.stringify(song));
     return `
-      <div class="row">
+      <div class="row" onmouseenter="handleWarmup('${song.id}')" ontouchstart="handleWarmup('${song.id}')">
         <button type="button" onclick="handlePlayNow('${songEncoded}')" class="art" style="border: 0; padding: 0; cursor: pointer; position: relative; overflow: hidden; background: url('${song.thumbnail}') center/cover" title="Play Now">
           <div style="position: absolute; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=0">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="var(--lime)"><path d="M8 5v14l11-7z"/></svg>
@@ -1499,9 +1564,20 @@ function renderSearchResults(items) {
   }).join('');
 }
 
+// Track Stream Pre-Warm Cache
+const warmedUpTracks = new Set();
+window.handleWarmup = (songId) => {
+  if (!songId || warmedUpTracks.has(songId)) return;
+  warmedUpTracks.add(songId);
+  try {
+    fetch(`/api/warmup/${encodeURIComponent(songId)}`, { priority: 'low' }).catch(() => {});
+  } catch (e) {}
+};
+
 // Quick Trending & Chip Search Listeners
 document.querySelectorAll('.sample-chip, .quick-search-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
+    btn.blur();
     const q = btn.dataset.query;
     if (inlineSearchInput && q) {
       inlineSearchInput.value = q;
@@ -1512,7 +1588,25 @@ document.querySelectorAll('.sample-chip, .quick-search-btn').forEach((btn) => {
 
 window.handlePlayNow = (songEncodedStr) => {
   try {
+    if (document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     const song = JSON.parse(decodeURIComponent(songEncodedStr));
+
+    // Optimistic audio pipeline preload within user click gesture for instant playback
+    if (nativeAudio && song?.id && !isCloudHosted && !nativeAudioFailed) {
+      const audioUrl = `/api/audio/${encodeURIComponent(song.id)}`;
+      if (!nativeAudio.src.endsWith(audioUrl)) {
+        nativeAudio.src = audioUrl;
+        nativeAudio.currentTime = 0;
+        nativeAudio.load();
+        const playPromise = nativeAudio.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+          playPromise.catch(() => {});
+        }
+      }
+    }
+
     socket.emit('play-now', { track: song });
   } catch (e) {
     console.error(e);
@@ -1521,6 +1615,9 @@ window.handlePlayNow = (songEncodedStr) => {
 
 window.handleQueueSong = (songEncodedStr, playNext) => {
   try {
+    if (document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     const song = JSON.parse(decodeURIComponent(songEncodedStr));
     socket.emit('add-to-queue', { track: song, playNext });
     showToast(`Added "${song.title.slice(0, 28)}..." to queue`, 'success');
@@ -1529,9 +1626,32 @@ window.handleQueueSong = (songEncodedStr, playNext) => {
   }
 };
 
-// Global Shortcut: / or Ctrl+K to search
+// Global Keyboard Shortcuts
 window.addEventListener('keydown', (e) => {
-  if (e.key === '/' && document.activeElement !== inlineSearchInput && document.activeElement !== chatInput) {
+  // Spacebar: Toggle play/pause
+  if (e.code === 'Space' || e.key === ' ') {
+    const activeEl = document.activeElement;
+    const tag = activeEl?.tagName?.toLowerCase();
+    const isEditable = tag === 'input' || tag === 'textarea' || activeEl?.isContentEditable;
+
+    // Allow normal typing inside input and textarea fields
+    if (isEditable) return;
+
+    // Prevent page scroll and prevent re-triggering focused button
+    e.preventDefault();
+    if (activeEl && typeof activeEl.blur === 'function') {
+      activeEl.blur();
+    }
+
+    // Toggle playback if a track is active in the room
+    if (currentRoom?.currentTrack) {
+      playPauseBtn?.click();
+    }
+    return;
+  }
+
+  // Global Shortcut: / or Ctrl+K to search
+  if ((e.key === '/' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k')) && document.activeElement !== inlineSearchInput && document.activeElement !== chatInput) {
     e.preventDefault();
     inlineSearchInput?.focus();
     inlineSearchInput?.select();
