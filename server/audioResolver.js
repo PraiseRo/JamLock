@@ -22,16 +22,18 @@ const FAIL_CACHE = new Map();
 const FAIL_TTL_MS = 1000 * 15;       // 15s cooldown on complete failure (was 60s)
 
 const PIPED_INSTANCES = [
-  'https://pipedapi.kavin.rocks',
-  'https://api.piped.private.coffee',
-  'https://pipedapi.tokhmi.xyz',
-  'https://pipedapi.moomoo.me'
+  'https://api.piped.privacydev.net',
+  'https://piped-api.lunar.icu',
+  'https://pipedapi.drgns.space',
+  'https://pipedapi.colins.pt',
+  'https://api.piped.private.coffee'
 ];
 
 const INVIDIOUS_INSTANCES = [
-  'https://inv.nadeko.net',
-  'https://invidious.nerdvpn.de',
-  'https://yewtu.be'
+  'https://vid.puffyan.us',
+  'https://invidious.projectsegfau.lt',
+  'https://invidious.flokinet.to',
+  'https://inv.nadeko.net'
 ];
 
 function withTimeout(promise, ms, label) {

@@ -148,6 +148,7 @@ socket.on('connect', () => {
   if (activeRoomId && savedUser) {
     const clientId = getBrowserClientId();
     socket.emit('join-room', { roomId: activeRoomId, username: savedUser, clientId, isCreating: false }, (res) => {
+      document.documentElement.classList.remove('in-room-loading');
       if (res?.success) {
         currentUser = res.user;
         currentRoom = res.room;
@@ -160,9 +161,16 @@ socket.on('connect', () => {
         leaveRoom();
       }
     });
+  } else {
+    document.documentElement.classList.remove('in-room-loading');
   }
 });
 setInterval(syncClock, 30000);
+
+// Global failsafe watchdog: never allow html.in-room-loading to stay stuck on screen
+setTimeout(() => {
+  document.documentElement.classList.remove('in-room-loading');
+}, 2500);
 
 // Reaction Counts State
 const reactionCounts = {
@@ -1158,6 +1166,63 @@ let nativeAudioFailed = false;
 let nativeStallTimer = null;
 const NATIVE_STALL_MS = isMobileClient ? 8000 : 5500;
 
+// High-availability CORS Piped & Invidious stream endpoints accessible from mobile consumer IPs
+const CLIENT_STREAM_RESOLVERS = [
+  'https://api.piped.privacydev.net',
+  'https://piped-api.lunar.icu',
+  'https://pipedapi.drgns.space',
+  'https://pipedapi.colins.pt'
+];
+const clientStreamCache = new Map();
+
+async function resolveClientSideStream(trackId) {
+  if (!trackId) return null;
+  const cached = clientStreamCache.get(trackId);
+  if (cached && Date.now() - cached.ts < 1000 * 60 * 15) {
+    return cached.url;
+  }
+
+  const attempts = CLIENT_STREAM_RESOLVERS.map(async (baseUrl) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    try {
+      const res = await fetch(`${baseUrl}/streams/${encodeURIComponent(trackId)}`, {
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json' }
+      });
+      if (!res.ok) throw new Error(`${baseUrl} HTTP ${res.status}`);
+      const data = await res.json();
+      const streams = Array.isArray(data?.audioStreams) ? data.audioStreams : [];
+      // Prefer M4A / AAC for universal iOS Safari and Android Chrome background play
+      const m4a = streams
+        .filter((s) => s.url && (s.mimeType?.startsWith('audio/mp4') || s.format === 'M4A'))
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      const anyAudio = streams
+        .filter((s) => s.url && s.mimeType?.startsWith('audio/'))
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      const chosen = m4a || anyAudio;
+      if (!chosen?.url) throw new Error('No audio streams found');
+      return chosen.url;
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  try {
+    const directUrl = await Promise.any(attempts);
+    if (directUrl) {
+      if (clientStreamCache.size > 100) {
+        clientStreamCache.delete(clientStreamCache.keys().next().value);
+      }
+      clientStreamCache.set(trackId, { url: directUrl, ts: Date.now() });
+      return directUrl;
+    }
+  } catch (e) {
+    audioLog('client-stream-resolver: failed all instances', e?.message || e);
+  }
+  return null;
+}
+
 function disarmNativeStallWatchdog() {
   if (nativeStallTimer) {
     clearTimeout(nativeStallTimer);
@@ -1169,7 +1234,7 @@ function armNativeStallWatchdog() {
   if (nativeStallTimer || nativeAudioFailed || activeEngine !== 'audio') return;
   if (!nativeAudio.paused && nativeAudio.readyState >= 3) return; // already playing fine, nothing to guard
   const token = loadRequestToken;
-  nativeStallTimer = setTimeout(() => {
+  nativeStallTimer = setTimeout(async () => {
     nativeStallTimer = null;
     if (token !== loadRequestToken || activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
     if (!currentRoom.playback?.isPlaying) return;
@@ -1183,6 +1248,26 @@ function armNativeStallWatchdog() {
       audioLog('watchdog: data loaded but not advancing (autoplay prompt / buffering); not falling back', nativeAudioSnapshot());
       return;
     }
+
+    // On mobile: before surrendering to iframe, attempt client-side direct stream bypass
+    if (isMobileClient && nativeAudio.src && nativeAudio.src.includes('/api/audio/')) {
+      audioLog('watchdog: attempting client-side direct stream bypass...');
+      const trackId = currentRoom.currentTrack.id;
+      const directUrl = await resolveClientSideStream(trackId);
+      if (directUrl && token === loadRequestToken && currentRoom?.currentTrack?.id === trackId) {
+        audioLog('watchdog: revived via client-side direct stream!', { directUrl: directUrl.substring(0, 45) });
+        nativeAudio.src = directUrl;
+        const livePos = Math.max(0, calculateServerPosition());
+        if (livePos > 0.5) {
+          try { nativeAudio.currentTime = livePos; } catch (e) {}
+        }
+        if (currentRoom.playback?.isPlaying) {
+          nativeAudio.play().catch((e) => logPlayReject('watchdog-revived', e));
+        }
+        return;
+      }
+    }
+
     audioLog('watchdog: STALLED, no data received -> falling back to YouTube', nativeAudioSnapshot());
     nativeAudioFailed = true;
     fallbackToYouTubeTrack(currentRoom, 'stall-watchdog');
@@ -1229,13 +1314,35 @@ if (nativeAudio) {
   });
 
   // Automatic fallback to YouTube IFrame if direct stream ever errors
-  nativeAudio.addEventListener('error', () => {
+  nativeAudio.addEventListener('error', async () => {
     if (activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
     if (nativeAudio.src === SILENT_WAV_DATA_URI) return;
     const mediaErr = nativeAudio.error;
     const labels = { 1: 'ABORTED', 2: 'NETWORK', 3: 'DECODE', 4: 'SRC_NOT_SUPPORTED' };
     // Ignore code 1 (ABORTED) caused by track switching or priming replacement
     if (mediaErr?.code === 1) return;
+
+    const currentTrackId = currentRoom.currentTrack.id;
+
+    // On mobile: if server proxy /api/audio/ failed (e.g. Render datacenter IP blocked), attempt client direct stream
+    if (isMobileClient && nativeAudio.src && nativeAudio.src.includes('/api/audio/')) {
+      audioLog('audio: server proxy error, attempting client-side direct stream bypass...');
+      const directUrl = await resolveClientSideStream(currentTrackId);
+      if (directUrl && currentRoom?.currentTrack?.id === currentTrackId) {
+        audioLog('audio: revived via client-side direct stream!', { directUrl: directUrl.substring(0, 45) });
+        nativeAudio.src = directUrl;
+        const livePos = Math.max(0, calculateServerPosition());
+        if (livePos > 0.5) {
+          try { nativeAudio.currentTime = livePos; } catch (e) {}
+        }
+        if (currentRoom.playback?.isPlaying) {
+          nativeAudio.play().catch((e) => logPlayReject('client-direct-stream', e));
+        }
+        disarmNativeStallWatchdog();
+        return;
+      }
+    }
+
     audioLog('audio:ERROR', {
       code: mediaErr?.code,
       label: labels[mediaErr?.code] || 'unknown',
@@ -2476,6 +2583,9 @@ if (usersStrip) {
 function renderRoomState(room) {
   if (!room) return;
 
+  // Clear initial hydration skeleton state
+  document.documentElement.classList.remove('in-room-loading');
+
   // Room switch: reset chat cache if entered a new room
   if (room.id && lastRenderedChatRoomId !== room.id) {
     lastRenderedChatRoomId = room.id;
@@ -2600,7 +2710,7 @@ function renderRoomState(room) {
     // Dynamic Ambient Backdrop from Album Cover Art
     if (ambientArtBg && room.currentTrack.thumbnail) {
       ambientArtBg.style.backgroundImage = `url("${room.currentTrack.thumbnail}")`;
-      ambientArtBg.style.opacity = '0.52';
+      ambientArtBg.style.opacity = '0.70';
     }
 
     // Sync Democratic Skip Votes Pill & Tooltip

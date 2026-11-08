@@ -999,9 +999,9 @@ button:focus-visible, input:focus-visible {
   }
 
   #ambient-art-bg {
-    filter: blur(28px) !important;
+    filter: blur(8px) !important;
     transform: translateZ(0) !important;
-    opacity: 0.35 !important;
+    opacity: 0.65 !important;
   }
 
   .dashboard-grid {
