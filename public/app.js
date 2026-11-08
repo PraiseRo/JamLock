@@ -674,10 +674,52 @@ async function probeAudioEndpoint(trackId) {
   }
 }
 
+// --- NATIVE STALL WATCHDOG ---
+// The direct stream can hang without ever firing an `error` event (e.g. YouTube blocks the server's IP).
+// If the native <audio> has received NO data 6s after the room starts playing, switch to the YouTube
+// player and keep using it for the rest of this page session (a reload retries native).
+// Note: audio that loaded but is blocked by browser autoplay (readyState >= 2) is NOT a stall;
+// that case is handled by the "Tap to Tune In" prompt.
+let nativeAudioFailed = false;
+let nativeStallTimer = null;
+const NATIVE_STALL_MS = 6000;
+
+function disarmNativeStallWatchdog() {
+  if (nativeStallTimer) {
+    clearTimeout(nativeStallTimer);
+    nativeStallTimer = null;
+  }
+}
+
+function armNativeStallWatchdog() {
+  if (nativeStallTimer || nativeAudioFailed || activeEngine !== 'audio') return;
+  if (!nativeAudio.paused && nativeAudio.readyState >= 3) return; // already playing fine, nothing to guard
+  const token = loadRequestToken;
+  nativeStallTimer = setTimeout(() => {
+    nativeStallTimer = null;
+    if (token !== loadRequestToken || activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
+    if (!currentRoom.playback?.isPlaying) return;
+
+    const advancing = !nativeAudio.paused && nativeAudio.readyState >= 3 && (nativeAudio.currentTime || 0) > 0;
+    if (advancing) {
+      audioLog('watchdog: audio advancing OK', nativeAudioSnapshot());
+      return;
+    }
+    if (nativeAudio.readyState >= 2) {
+      audioLog('watchdog: data loaded but not advancing (autoplay prompt / buffering); not falling back', nativeAudioSnapshot());
+      return;
+    }
+    audioLog('watchdog: STALLED, no data received -> falling back to YouTube', nativeAudioSnapshot());
+    nativeAudioFailed = true;
+    fallbackToYouTubeTrack(currentRoom, 'stall-watchdog');
+  }, NATIVE_STALL_MS);
+}
+
 // Wire native <audio> events (enables true background play on iOS/Android)
 if (nativeAudio) {
   nativeAudio.addEventListener('playing', () => {
     if (activeEngine !== 'audio') return;
+    disarmNativeStallWatchdog();
     showAudioPrompt(false);
     notPlayingSince = 0;
 
@@ -719,6 +761,7 @@ if (nativeAudio) {
       ...nativeAudioSnapshot()
     });
     probeAudioEndpoint(currentRoom.currentTrack.id);
+    nativeAudioFailed = true;
     fallbackToYouTubeTrack(currentRoom, 'native-audio-error');
   });
 
@@ -965,6 +1008,7 @@ function fallbackToYouTubeTrack(room, reason = 'unspecified') {
   if (!room?.currentTrack) return;
   audioLog('fallback-yt', { reason, id: room.currentTrack.id, ytReady });
   activeEngine = 'yt';
+  disarmNativeStallWatchdog();
   if (nativeAudio) {
     try {
       nativeAudio.pause();
@@ -972,7 +1016,12 @@ function fallbackToYouTubeTrack(room, reason = 'unspecified') {
       nativeAudio.load();
     } catch (e) {}
   }
-  if (!ytReady || !ytPlayer) return;
+  if (!ytReady || !ytPlayer) {
+    // YouTube API not ready yet: forget the loaded id so onReady re-runs loadCurrentTrack for this track
+    loadedTrackId = null;
+    audioLog('fallback-yt deferred', 'YouTube player not ready yet; will load on ready');
+    return;
+  }
   try {
     const startSec = calculateServerPosition();
     settlePending = true;
@@ -1008,7 +1057,7 @@ function loadCurrentTrack(room) {
   updateMediaSessionMetadata(track);
   syncWakeLock(Boolean(room.playback?.isPlaying));
 
-  if (nativeAudio && trackId) {
+  if (nativeAudio && trackId && !nativeAudioFailed) {
     activeEngine = 'audio';
     // Stop YouTube iframe so it never double-plays
     if (ytReady && ytPlayer && typeof ytPlayer.stopVideo === 'function') {
@@ -1027,14 +1076,9 @@ function loadCurrentTrack(room) {
       vol: currentVolume
     });
 
-    // Diagnostics only: if nothing is audible 5s after loading, log a full "why not playing" snapshot
-    const checkToken = loadRequestToken;
-    setTimeout(() => {
-      if (checkToken !== loadRequestToken || activeEngine !== 'audio') return;
-      if (!currentRoom?.playback?.isPlaying) return;
-      const advancing = !nativeAudio.paused && nativeAudio.readyState >= 3 && (nativeAudio.currentTime || 0) > 0;
-      audioLog(advancing ? 'check-5s: audio advancing OK' : 'check-5s: NOT PLAYING', nativeAudioSnapshot());
-    }, 5000);
+    // Active watchdog: if no data arrives within NATIVE_STALL_MS, fall back to the YouTube player
+    disarmNativeStallWatchdog();
+    armNativeStallWatchdog();
 
     // Seek to server position as soon as metadata is ready
     const onLoadedMeta = () => {
@@ -1067,7 +1111,7 @@ function loadCurrentTrack(room) {
     return;
   }
 
-  fallbackToYouTubeTrack(room, 'no-native-audio-element');
+  fallbackToYouTubeTrack(room, nativeAudioFailed ? 'native-disabled-this-session' : 'no-native-audio-element');
 }
 
 // "Tap to tune in / enable audio" pill shown when the browser blocks autoplay on reload
@@ -1209,6 +1253,7 @@ function applyRoomPlayback(playback) {
   if (activeEngine === 'audio' && nativeAudio && nativeAudio.src) {
     try {
       if (playback.isPlaying) {
+        armNativeStallWatchdog(); // no-op if already armed / native already playing
         const drift = Math.abs((nativeAudio.currentTime || 0) - serverPos);
         if (drift > DRIFT_HARD_SEEK_SEC) {
           driftSeek(serverPos, nativeAudio.paused);
