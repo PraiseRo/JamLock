@@ -114,6 +114,49 @@
   transform: scale(0.96);
 }
 
+/* Auto-Suggest Modern Toggle Switch */
+#auto-suggest-switch-btn {
+  width: 40px;
+  height: 24px;
+  border-radius: 999px;
+  border: 0;
+  position: relative;
+  padding: 0;
+  cursor: pointer;
+  background: var(--lime);
+  transition: background 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  flex-shrink: 0;
+}
+
+#auto-suggest-switch-btn[aria-checked="false"] {
+  background: #26262F !important;
+}
+
+#auto-suggest-switch-btn[aria-checked="true"] {
+  background: var(--lime) !important;
+}
+
+#auto-suggest-switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #0A0A0D;
+  transform: translateX(16px);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+#auto-suggest-switch-btn[aria-checked="false"] #auto-suggest-switch-knob {
+  transform: translateX(0) !important;
+}
+
+#auto-suggest-switch-btn[aria-checked="true"] #auto-suggest-switch-knob {
+  transform: translateX(16px) !important;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -272,6 +315,7 @@ button:focus-visible, input:focus-visible {
   transition: all 0.15s ease;
   contain: layout style;
   border: 1px solid transparent;
+  touch-action: pan-y;
 }
 
 .row:hover {
@@ -714,8 +758,8 @@ button:focus-visible, input:focus-visible {
   }
 }
 
-/* Optimized scroll containment for mobile lists */
-#chat-messages, #queue-list, #search-results-list {
+/* Optimized scroll containment for desktop/mobile lists */
+#chat-messages, #queue-list {
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   contain: layout style;
@@ -821,6 +865,21 @@ button:focus-visible, input:focus-visible {
     display: none !important;
   }
 
+  /* Mobile GPU 60fps Optimization: Disable stacked backdrop-filter blurs */
+  .card, .dashboard-card, .rooms-card {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    background: #14141A !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
+    transform: translateZ(0);
+  }
+
+  #ambient-art-bg {
+    filter: blur(28px) !important;
+    transform: translateZ(0) !important;
+    opacity: 0.35 !important;
+  }
+
   .dashboard-grid {
     padding: 0 14px 24px !important;
     gap: 14px !important;
@@ -919,6 +978,14 @@ button:focus-visible, input:focus-visible {
   .search-dashboard-card .art {
     width: 42px !important;
     height: 42px !important;
+  }
+
+  /* Unlock mobile search scrolling across results */
+  #search-results-section,
+  #search-results-list {
+    overscroll-behavior: auto !important;
+    overflow: visible !important;
+    touch-action: pan-y !important;
   }
 }
 

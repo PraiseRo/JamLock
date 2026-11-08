@@ -314,8 +314,15 @@ function initWavyBar() {
 }
 initWavyBar();
 
+let lastRenderedPct = -1;
 function updateWaveformProgress(progressPercent) {
   const boundedPct = Math.max(0, Math.min(100, progressPercent));
+
+  // Skip redundant DOM/SVG mutations if percentage delta is negligible (<0.15%)
+  if (Math.abs(boundedPct - lastRenderedPct) < 0.15 && boundedPct !== 0 && boundedPct !== 100) {
+    return;
+  }
+  lastRenderedPct = boundedPct;
 
   // Update SVG clip width (0 to 1000 in viewBox space)
   if (waveClipRect) {
@@ -412,8 +419,12 @@ function updateVolumeUI() {
 
 // --- 3. AUTO-SUGGEST SWITCH (Custom Pill Switch) ---
 let autoSuggestEnabled = true;
+try {
+  autoSuggestEnabled = localStorage.getItem('jamlock_autosuggest') !== '0';
+} catch (e) {}
 
 if (autoSuggestSwitchBtn) {
+  autoSuggestSwitchBtn.setAttribute('aria-checked', autoSuggestEnabled ? 'true' : 'false');
   autoSuggestSwitchBtn.addEventListener('click', () => {
     autoSuggestEnabled = !autoSuggestEnabled;
     syncAutoSuggestUI(autoSuggestEnabled);
@@ -422,18 +433,12 @@ if (autoSuggestSwitchBtn) {
 }
 
 function syncAutoSuggestUI(enabled) {
-  autoSuggestEnabled = enabled;
-  if (!autoSuggestSwitchBtn || !autoSuggestSwitchKnob) return;
-  autoSuggestSwitchBtn.setAttribute('aria-checked', enabled ? 'true' : 'false');
-  if (enabled) {
-    autoSuggestSwitchBtn.style.background = 'var(--lime)';
-    autoSuggestSwitchKnob.style.right = '3px';
-    autoSuggestSwitchKnob.style.left = 'auto';
-  } else {
-    autoSuggestSwitchBtn.style.background = '#2E2E38';
-    autoSuggestSwitchKnob.style.left = '3px';
-    autoSuggestSwitchKnob.style.right = 'auto';
-  }
+  autoSuggestEnabled = Boolean(enabled);
+  try {
+    localStorage.setItem('jamlock_autosuggest', autoSuggestEnabled ? '1' : '0');
+  } catch (e) {}
+  if (!autoSuggestSwitchBtn) return;
+  autoSuggestSwitchBtn.setAttribute('aria-checked', autoSuggestEnabled ? 'true' : 'false');
 }
 
 // --- 4. ROOM RESTORATION & NAVIGATION ---
@@ -708,9 +713,12 @@ saveSettingsBtn?.addEventListener('click', () => {
 });
 
 // --- 6. SYNCHRONIZATION, HYBRID AUDIO ENGINE & LOCK-SCREEN MEDIA SESSION ---
-const DRIFT_HARD_SEEK_SEC = 0.4;   // only seek when this far off
+const isMobileClient = /mobile|android|iphone|ipad|ipod/i.test(navigator.userAgent);
+const DRIFT_HARD_SEEK_SEC = 0.4;   // Native <audio> drift threshold
+// On cloud/mobile YouTube, use 1.25s tolerance to eliminate audio micro-stutters from coarse timer quantization
+const DRIFT_YT_SEEK_SEC = (isCloudHosted || isMobileClient) ? 1.25 : 0.6;
 const DRIFT_SETTLE_SEC = 0.25;     // tighter check right after a track starts
-const SEEK_COOLDOWN_MS = 2500;     // never seek more often than this (prevents seek storms)
+const SEEK_COOLDOWN_MS = isMobileClient ? 4000 : 2500; // never seek more often than this (prevents seek storms)
 let lastSeekAt = 0;
 let seekIssuedAt = 0;
 let seekLagSec = 0.25;             // measured delay between seekTo() and audio resuming
@@ -1084,8 +1092,8 @@ function startSyncEngine() {
 
         if (roomPlaying) {
           if (state === YT.PlayerState.PLAYING) {
-            // Cooldown + tight threshold; never seek while buffering/loading
-            if (Math.abs(local - effectiveTime) > DRIFT_HARD_SEEK_SEC) driftSeek(effectiveTime);
+            // Differentiated tolerance: avoids constant micro-seek stuttering on mobile YouTube
+            if (Math.abs(local - effectiveTime) > DRIFT_YT_SEEK_SEC) driftSeek(effectiveTime);
           } else if (!isActive && Date.now() - lastPlayKick > 3000) {
             lastPlayKick = Date.now();
             ytPlayer.playVideo();
@@ -1687,7 +1695,7 @@ function renderSearchResults(items) {
     const songEncoded = encodeURIComponent(JSON.stringify(song));
     const displayTitle = getDisplayTitle(song);
     return `
-      <div class="row" onmouseenter="handleWarmup('${song.id}')" ontouchstart="handleWarmup('${song.id}')">
+      <div class="row" onmouseenter="handleWarmup('${song.id}')">
         <button type="button" onclick="handlePlayNow('${songEncoded}')" class="art-btn" style="background-image: url('${song.thumbnail}')" title="Play Now">
           <div class="play-hint">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="var(--lime)"><path d="M8 5v14l11-7z"/></svg>
