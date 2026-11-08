@@ -26,6 +26,7 @@ export async function getYoutubeAudioFormat(videoId) {
   }
 
   const promise = (async () => {
+    const startedAt = Date.now();
     try {
       const info = await ytdl.getInfo(videoId);
       const formats = Array.isArray(info?.formats) ? info.formats : [];
@@ -40,7 +41,10 @@ export async function getYoutubeAudioFormat(videoId) {
         .sort((a, b) => (b.audioBitrate || b.bitrate || 0) - (a.audioBitrate || a.bitrate || 0))[0];
 
       const chosen = m4a140 || anyMp4Audio || fallbackAudio || chooseFormat(formats, { quality: 'highestaudio', filter: 'audioonly' });
-      if (!chosen?.url) return null;
+      if (!chosen?.url) {
+        console.warn(`[audio] extract FAILED id=${videoId} after ${Date.now() - startedAt}ms: no playable audio format (${formats.length} formats)`);
+        return null;
+      }
 
       const data = {
         url: chosen.url,
@@ -54,8 +58,11 @@ export async function getYoutubeAudioFormat(videoId) {
         FORMAT_CACHE.delete(oldest);
       }
       FORMAT_CACHE.set(videoId, { data, timestamp: Date.now() });
+      console.log(`[audio] extract ok id=${videoId} itag=${data.itag} in ${Date.now() - startedAt}ms`);
       return data;
     } catch (err) {
+      // Real reason stays in server logs only (never sent to clients)
+      console.warn(`[audio] extract FAILED id=${videoId} after ${Date.now() - startedAt}ms: ${err?.message || err}`);
       return null;
     } finally {
       INFLIGHT.delete(videoId);
@@ -72,7 +79,8 @@ export async function streamAudioToClient(req, res) {
   const format = await getYoutubeAudioFormat(videoId);
 
   if (!format || !format.url) {
-    res.status(404).json({ error: 'Audio stream unavailable' });
+    console.warn(`[audio] stream 404 id=${videoId}: no format (extraction failed)`);
+    res.status(404).json({ error: 'Audio stream unavailable', reason: 'extract-failed' });
     return;
   }
 
@@ -98,6 +106,7 @@ export async function streamAudioToClient(req, res) {
 
     // If cached googlevideo URL expired (403/410), refresh once and retry
     if (upstreamRes.status === 403 || upstreamRes.status === 410) {
+      console.warn(`[audio] upstream ${upstreamRes.status} id=${videoId}: refreshing URL and retrying once`);
       FORMAT_CACHE.delete(videoId);
       const fresh = await getYoutubeAudioFormat(videoId);
       if (fresh?.url) {
@@ -105,11 +114,16 @@ export async function streamAudioToClient(req, res) {
           headers: upstreamHeaders,
           signal: abortController.signal
         });
+        console.warn(`[audio] retry result id=${videoId}: upstream ${upstreamRes.status}`);
+      } else {
+        console.warn(`[audio] retry aborted id=${videoId}: re-extraction failed`);
       }
     }
 
     if (!upstreamRes.ok && upstreamRes.status !== 206) {
-      res.status(502).end();
+      console.warn(`[audio] stream 502 id=${videoId}: upstream status ${upstreamRes.status}`);
+      const reason = (upstreamRes.status === 403 || upstreamRes.status === 410) ? 'upstream-403' : 'upstream-error';
+      res.status(502).json({ error: 'Audio upstream failed', reason });
       return;
     }
 
@@ -135,8 +149,11 @@ export async function streamAudioToClient(req, res) {
     });
     nodeStream.pipe(res);
   } catch (e) {
+    if (e?.name !== 'AbortError') {
+      console.warn(`[audio] stream error id=${videoId}: ${e?.message || e}`);
+    }
     if (!res.headersSent) {
-      res.status(500).end();
+      res.status(500).json({ error: 'Audio stream error', reason: 'server-error' });
     } else {
       try { res.end(); } catch (err) {}
     }
