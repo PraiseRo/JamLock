@@ -1405,7 +1405,7 @@ window.onYouTubeIframeAPIReady = () => {
       fs: 0,
       playsinline: 1,
       enablejsapi: 1,
-      origin: window.location.origin
+      origin: window.location.protocol + '//' + window.location.host
     },
     events: {
       onReady: () => {
@@ -2522,7 +2522,7 @@ socket.on('skip-votes-updated', ({ votes, required }) => {
     }
   }
   if (skipBtn) {
-    const isHost = currentRoom && currentRoom.hostId === currentUserId;
+    const isHost = Boolean(currentUser?.isHost);
     if (isHost) {
       skipBtn.title = 'Skip Track (Host override)';
     } else {
@@ -2782,7 +2782,7 @@ function renderRoomState(room) {
       }
     }
     if (skipBtn) {
-      const isHost = room.hostId === currentUserId;
+      const isHost = Boolean(currentUser?.isHost);
       if (isHost) {
         skipBtn.title = 'Skip Track (Host override)';
       } else {
