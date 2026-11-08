@@ -316,8 +316,8 @@
           </div>
         </div>
 
-        <!-- Bottom: Reaction Buttons Centered in Middle with balanced vertical spacing & DJ Soundboard -->
-        <div style="display: flex; align-items: center; justify-content: center; gap: 14px; margin: 4px auto 0; flex-wrap: wrap">
+        <!-- Bottom: Reaction Buttons Centered in Middle with balanced vertical spacing -->
+        <div style="display: flex; align-items: center; justify-content: center; margin: 4px auto 0">
           <div class="reactions-strip" style="display: flex; align-items: center; gap: 10px">
             <button class="rb reaction-btn" data-emoji="🔥" aria-label="Fire reaction" style="color: var(--amber)">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
@@ -335,13 +335,6 @@
               <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>
               <b id="rx-star-count"></b>
             </button>
-          </div>
-
-          <!-- DJ Soundboard Quick Trigger Strip -->
-          <div class="sfx-strip" style="display: flex; align-items: center; gap: 6px; padding-left: 12px; border-left: 1px solid var(--border-ctrl)">
-            <button type="button" class="sfx-btn" data-sfx="airhorn" title="DJ Air Horn" aria-label="DJ Air horn sound effect">📯</button>
-            <button type="button" class="sfx-btn" data-sfx="scratch" title="Vinyl Scratch" aria-label="Vinyl scratch sound effect">💿</button>
-            <button type="button" class="sfx-btn" data-sfx="laser" title="Laser Pew" aria-label="Laser sound effect">💥</button>
           </div>
         </div>
       </section>
@@ -429,8 +422,8 @@
 
       <!-- CARD 3 (Bottom-Left): SEARCH & RESULTS CARD -->
       <section id="panel-search" class="card dashboard-card tab-panel search-dashboard-card">
-        <!-- Active Search Input Box -->
-        <div style="display: flex; align-items: center; gap: 12px; height: 50px; padding: 0 16px; border-radius: 14px; background: rgba(14, 14, 18, 0.7); border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4)">
+        <!-- Active Search Input Box (Firmly fixed height) -->
+        <div class="search-input-wrapper">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
           <input id="inline-search-input" aria-label="Search songs or paste a YouTube link" placeholder="Search songs or paste YouTube link..." style="flex: 1; min-width: 0; height: 100%; background: transparent; border: 0; outline: none; color: var(--text-main); font-size: 14px">
           <span id="search-spinner" class="hidden" style="color: var(--lime); font-size: 12px">Searching...</span>
@@ -528,36 +521,81 @@
         <button id="close-settings-modal-btn" style="background: none; border: 0; color: var(--text-muted); font-size: 16px">✕</button>
       </div>
 
-      <div style="display: flex; flex-direction: column; gap: 14px; font-size: 13px">
+      <div style="display: flex; flex-direction: column; gap: 16px; font-size: 13px">
         <div>
           <label style="display: block; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px">DJ Playback Control</label>
-          <select id="setting-dj-mode" style="width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 12px">
-            <option value="anyone">Anyone can play, pause, seek, or skip</option>
-            <option value="host-only">Host Only (Guests can only listen)</option>
-          </select>
+          <div class="custom-dropdown-wrap" id="wrap-setting-dj-mode">
+            <input type="hidden" id="setting-dj-mode" value="anyone">
+            <button type="button" class="custom-dropdown-pill" aria-haspopup="listbox" aria-expanded="false">
+              <span class="custom-dropdown-label">Anyone can play, pause, seek, or skip</span>
+              <svg class="custom-dropdown-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div class="custom-dropdown-menu" role="listbox">
+              <div class="custom-dropdown-option is-selected" data-value="anyone">
+                <span class="option-text">Anyone can play, pause, seek, or skip</span>
+                <span class="option-check">✓</span>
+              </div>
+              <div class="custom-dropdown-option" data-value="host-only">
+                <span class="option-text">Host Only (Guests can only listen)</span>
+                <span class="option-check">✓</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div>
           <label style="display: block; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px">Queue Permissions</label>
-          <select id="setting-queue-mode" style="width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 12px">
-            <option value="anyone">Anyone can add songs to queue</option>
-            <option value="host-only">Host Only (Only host can add songs)</option>
-          </select>
+          <div class="custom-dropdown-wrap" id="wrap-setting-queue-mode">
+            <input type="hidden" id="setting-queue-mode" value="anyone">
+            <button type="button" class="custom-dropdown-pill" aria-haspopup="listbox" aria-expanded="false">
+              <span class="custom-dropdown-label">Anyone can add songs to queue</span>
+              <svg class="custom-dropdown-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div class="custom-dropdown-menu" role="listbox">
+              <div class="custom-dropdown-option is-selected" data-value="anyone">
+                <span class="option-text">Anyone can add songs to queue</span>
+                <span class="option-check">✓</span>
+              </div>
+              <div class="custom-dropdown-option" data-value="host-only">
+                <span class="option-text">Host Only (Only host can add songs)</span>
+                <span class="option-check">✓</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div>
           <label style="display: block; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px">Room Mood Theme</label>
-          <select id="setting-theme" style="width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 12px">
-            <option value="electric">⚡ Electric Lime (Default)</option>
-            <option value="cyber">🌸 Cyber Neon (Pink & Cyan)</option>
-            <option value="sunset">🌇 Sunset Glow (Amber & Coral)</option>
-            <option value="midnight">🌙 Midnight Lofi (Lavender & Ice Blue)</option>
-          </select>
+          <div class="custom-dropdown-wrap" id="wrap-setting-theme">
+            <input type="hidden" id="setting-theme" value="electric">
+            <button type="button" class="custom-dropdown-pill" aria-haspopup="listbox" aria-expanded="false">
+              <span class="custom-dropdown-label">⚡ Electric Lime (Default)</span>
+              <svg class="custom-dropdown-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div class="custom-dropdown-menu" role="listbox">
+              <div class="custom-dropdown-option is-selected" data-value="electric">
+                <span class="option-text">⚡ Electric Lime (Default)</span>
+                <span class="option-check">✓</span>
+              </div>
+              <div class="custom-dropdown-option" data-value="cyber">
+                <span class="option-text">🌸 Cyber Neon (Pink &amp; Cyan)</span>
+                <span class="option-check">✓</span>
+              </div>
+              <div class="custom-dropdown-option" data-value="sunset">
+                <span class="option-text">🌇 Sunset Glow (Amber &amp; Coral)</span>
+                <span class="option-check">✓</span>
+              </div>
+              <div class="custom-dropdown-option" data-value="midnight">
+                <span class="option-text">🌙 Midnight Lofi (Lavender &amp; Ice Blue)</span>
+                <span class="option-check">✓</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div>
           <label style="display: block; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px">Room Security PIN (Optional)</label>
-          <input id="setting-room-pin" type="text" maxlength="8" placeholder="Leave blank for public room" style="width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 12px; font-family: monospace; font-size: 14px">
+          <input id="setting-room-pin" type="text" maxlength="8" placeholder="Leave blank for public room" style="width: 100%; height: 44px; border-radius: 999px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 16px; font-family: monospace; font-size: 14px">
         </div>
       </div>
 

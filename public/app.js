@@ -593,9 +593,14 @@ window.addEventListener('DOMContentLoaded', () => {
     showToast(`Display name saved as "${val}"`, 'success');
   });
 
+  if (roomParam && joinCodeInput) {
+    joinCodeInput.value = roomParam.toUpperCase();
+  } else if (joinCodeInput) {
+    joinCodeInput.value = '';
+  }
+
   if (targetRoom) {
     const cleanRoomCode = targetRoom.toUpperCase();
-    if (joinCodeInput) joinCodeInput.value = cleanRoomCode;
 
     // Pre-flight check: ensure room exists before asking for username or attempting to join
     fetch(`/api/room/${cleanRoomCode}`)
@@ -869,22 +874,110 @@ copyRoomLinkBtn?.addEventListener('click', async () => {
   }
 });
 
-// --- 5. HOST SETTINGS MODAL ---
+// --- 5. HOST SETTINGS & CUSTOM PILL DROPDOWNS ---
+function syncCustomDropdown(wrapId, value) {
+  const wrap = document.getElementById(wrapId);
+  if (!wrap) return;
+  const input = wrap.querySelector('input[type="hidden"]');
+  const label = wrap.querySelector('.custom-dropdown-label');
+  const options = wrap.querySelectorAll('.custom-dropdown-option');
+
+  if (input) input.value = value;
+
+  options.forEach((opt) => {
+    const isMatch = opt.getAttribute('data-value') === value;
+    opt.classList.toggle('is-selected', isMatch);
+    if (isMatch && label) {
+      const optText = opt.querySelector('.option-text')?.textContent || opt.textContent;
+      label.textContent = optText.trim();
+    }
+  });
+}
+
+function closeAllCustomDropdowns() {
+  document.querySelectorAll('.custom-dropdown-wrap.is-open').forEach((w) => {
+    w.classList.remove('is-open');
+    w.querySelector('.custom-dropdown-pill')?.setAttribute('aria-expanded', 'false');
+  });
+}
+
+function initCustomDropdowns() {
+  const wraps = document.querySelectorAll('.custom-dropdown-wrap');
+  wraps.forEach((wrap) => {
+    const pill = wrap.querySelector('.custom-dropdown-pill');
+    const input = wrap.querySelector('input[type="hidden"]');
+    const label = wrap.querySelector('.custom-dropdown-label');
+    const options = wrap.querySelectorAll('.custom-dropdown-option');
+
+    pill?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isOpen = wrap.classList.contains('is-open');
+      closeAllCustomDropdowns();
+      if (!isOpen) {
+        wrap.classList.add('is-open');
+        pill.setAttribute('aria-expanded', 'true');
+      }
+    });
+
+    options.forEach((opt) => {
+      opt.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const val = opt.getAttribute('data-value');
+        if (input) input.value = val;
+        const text = opt.querySelector('.option-text')?.textContent || opt.textContent;
+        if (label) label.textContent = text.trim();
+
+        options.forEach((o) => o.classList.toggle('is-selected', o === opt));
+        wrap.classList.remove('is-open');
+        pill?.setAttribute('aria-expanded', 'false');
+      });
+    });
+  });
+
+  // Close when tapping/clicking anywhere outside
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.custom-dropdown-wrap')) {
+      closeAllCustomDropdowns();
+    }
+  });
+
+  // Close when pressing Escape key
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeAllCustomDropdowns();
+    }
+  });
+}
+
+// Initialize custom pill dropdowns immediately
+initCustomDropdowns();
+
 hostSettingsBtn?.addEventListener('click', () => {
   if (currentRoom?.settings) {
-    if (settingDjMode) settingDjMode.value = currentRoom.settings.djMode || 'anyone';
-    if (settingQueueMode) settingQueueMode.value = currentRoom.settings.queueMode || 'anyone';
-    if (settingTheme) settingTheme.value = currentRoom.settings.theme || 'electric';
+    const djVal = currentRoom.settings.djMode || 'anyone';
+    const queueVal = currentRoom.settings.queueMode || 'anyone';
+    const themeVal = currentRoom.settings.theme || 'electric';
+
+    if (settingDjMode) settingDjMode.value = djVal;
+    if (settingQueueMode) settingQueueMode.value = queueVal;
+    if (settingTheme) settingTheme.value = themeVal;
     if (settingRoomPin) settingRoomPin.value = currentRoom.settings.pin || '';
+
+    syncCustomDropdown('wrap-setting-dj-mode', djVal);
+    syncCustomDropdown('wrap-setting-queue-mode', queueVal);
+    syncCustomDropdown('wrap-setting-theme', themeVal);
   }
+  closeAllCustomDropdowns();
   settingsModal?.classList.remove('hidden');
 });
 
 closeSettingsModalBtn?.addEventListener('click', () => {
+  closeAllCustomDropdowns();
   settingsModal?.classList.add('hidden');
 });
 
 saveSettingsBtn?.addEventListener('click', () => {
+  closeAllCustomDropdowns();
   socket.emit('update-room-settings', {
     djMode: settingDjMode?.value || 'anyone',
     queueMode: settingQueueMode?.value || 'anyone',
@@ -2189,108 +2282,6 @@ function triggerEmojiStorm() {
     setTimeout(() => playerCard.classList.remove('party-pulse'), 1200);
   }
 }
-
-// --- DJ HYPE SOUNDBOARD & WEBAUDIO SYNTHESIZER ---
-let sfxAudioCtx = null;
-function getSfxAudioContext() {
-  if (!sfxAudioCtx) {
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (AudioContext) sfxAudioCtx = new AudioContext();
-  }
-  if (sfxAudioCtx && sfxAudioCtx.state === 'suspended') {
-    sfxAudioCtx.resume().catch(() => {});
-  }
-  return sfxAudioCtx;
-}
-
-function playSynthesizedSfx(sound) {
-  const ctx = getSfxAudioContext();
-  if (!ctx) return;
-  const now = ctx.currentTime;
-
-  try {
-    if (sound === 'laser') {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(880, now);
-      osc.frequency.exponentialRampToValueAtTime(110, now + 0.18);
-      gain.gain.setValueAtTime(0.32, now);
-      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.18);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + 0.18);
-    } else if (sound === 'airhorn') {
-      const freqs = [698.46, 932.33, 1046.5];
-      const stabs = [0, 0.12, 0.28];
-      stabs.forEach((startTime, idx) => {
-        const stabTime = now + startTime;
-        const dur = idx === 2 ? 0.45 : 0.08;
-        freqs.forEach((f) => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'sawtooth';
-          osc.frequency.setValueAtTime(f, stabTime);
-          gain.gain.setValueAtTime(0.15, stabTime);
-          gain.gain.exponentialRampToValueAtTime(0.01, stabTime + dur);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start(stabTime);
-          osc.stop(stabTime + dur);
-        });
-      });
-    } else if (sound === 'scratch') {
-      const bufferSize = Math.floor(ctx.sampleRate * 0.22);
-      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-      const data = buffer.getChannelData(0);
-      for (let i = 0; i < bufferSize; i++) {
-        data[i] = (Math.random() * 2 - 1) * Math.sin((i / bufferSize) * Math.PI);
-      }
-      const noise = ctx.createBufferSource();
-      noise.buffer = buffer;
-      const filter = ctx.createBiquadFilter();
-      filter.type = 'bandpass';
-      filter.frequency.setValueAtTime(600, now);
-      filter.frequency.linearRampToValueAtTime(3200, now + 0.1);
-      filter.frequency.linearRampToValueAtTime(400, now + 0.22);
-      filter.Q.value = 4.0;
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.35, now);
-      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.22);
-      noise.connect(filter);
-      filter.connect(gain);
-      gain.connect(ctx.destination);
-      noise.start(now);
-      noise.stop(now + 0.22);
-    }
-  } catch (err) {}
-}
-
-document.querySelectorAll('.sfx-btn').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    const sound = btn.dataset.sfx;
-    if (!sound) return;
-    getSfxAudioContext();
-    socket.emit('play-sfx', { sound });
-  });
-});
-
-socket.on('sfx-played', ({ sound, username }) => {
-  playSynthesizedSfx(sound);
-  const playerCard = document.getElementById('panel-player');
-  if (playerCard) {
-    playerCard.classList.add('party-pulse');
-    setTimeout(() => playerCard.classList.remove('party-pulse'), 800);
-  }
-});
-
-socket.on('sfx-cooldown', ({ remainingMs }) => {
-  document.querySelectorAll('.sfx-btn').forEach((btn) => {
-    btn.classList.add('sfx-cooldown');
-    setTimeout(() => btn.classList.remove('sfx-cooldown'), remainingMs || 3000);
-  });
-});
 
 // --- AUTO-FILL 3 SIMILAR TRACKS BUTTON ---
 const queueSimilarBtn = document.getElementById('queue-similar-btn');

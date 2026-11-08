@@ -419,8 +419,6 @@ app.get('/api/admin/stats', (req, res) => {
 });
 
 // WebSocket Connection Handlers
-const roomSfxCooldowns = new Map();
-
 io.on('connection', (socket) => {
   let currentRoomId = null;
 
@@ -822,31 +820,6 @@ io.on('connection', (socket) => {
     rooms.addTrackReaction(currentRoomId, reactionData);
 
     io.to(currentRoomId).emit('reaction-received', reactionData);
-  });
-
-  // DJ Hype Soundboard with Room Cooldown (3.5s anti-spam)
-  socket.on('play-sfx', ({ sound }) => {
-    if (!currentRoomId) return;
-    const room = rooms.getRoom(currentRoomId);
-    if (!room) return;
-
-    const validSounds = ['airhorn', 'scratch', 'laser'];
-    if (!validSounds.includes(sound)) return;
-
-    const now = Date.now();
-    const lastPlayed = roomSfxCooldowns.get(currentRoomId) || 0;
-    if (now - lastPlayed < 3500) {
-      socket.emit('sfx-cooldown', { remainingMs: 3500 - (now - lastPlayed) });
-      return;
-    }
-
-    roomSfxCooldowns.set(currentRoomId, now);
-    metrics.recordReaction();
-    const user = room.users.get(socket.id);
-    io.to(currentRoomId).emit('sfx-played', {
-      sound,
-      username: user?.username || 'DJ'
-    });
   });
 
   // Auto-Queue 3 Similar Tracks
