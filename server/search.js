@@ -1,5 +1,6 @@
 // Fast Multi-Tier Search Engine with Direct YouTubei JSON & LRU In-Memory Cache
 import ytSearch from 'yt-search';
+import { detectGenreFamily, buildGenreDiscoveryQueries, normalizeArtistName, GENRE_FAMILIES } from './genreFamilies.js';
 
 // Global In-Memory Cache: cleanQuery -> { data, timestamp }
 const CACHE = new Map();
@@ -399,17 +400,17 @@ function extractCoreTitle(title) {
     .trim();
 }
 
-// Get Smart Recommendations based on genre/vibe of the previous track,
-// ensuring the exact same song is NEVER re-recommended in a different format
+// Get Smart Recommendations based on genre family with guaranteed artist rotation
+// Ensures the next track stays in the same musical genre while rotating artists (no repeat in 4-5 songs)
 export async function getRecommendations(currentTrack, history = []) {
   if (!currentTrack) return null;
 
-  // 1. Build set of banned canonical keys and banned core song titles from history & current track
+  // 1. Build banned sets from recent history (last 10 tracks)
   const bannedSongKeys = new Set();
   const bannedCoreTitles = new Set();
   const historyIds = new Set();
 
-  const allPlayed = [...history, currentTrack];
+  const allPlayed = [...history.slice(0, 10), currentTrack];
   for (const t of allPlayed) {
     if (!t) continue;
     if (t.id) historyIds.add(t.id);
@@ -420,29 +421,43 @@ export async function getRecommendations(currentTrack, history = []) {
     if (core && core.length > 2) bannedCoreTitles.add(core);
   }
 
-  // 2. Discover related songs by musical vibe / artist playlist
-  // Query variants to broaden recommendations across the genre
-  const queries = [
-    `${currentTrack.artist} similar playlist songs`,
-    `${currentTrack.artist} greatest hits audio`,
-    `${extractCoreTitle(currentTrack.title)} related songs mix`
-  ];
+  // 2. Track artists who appeared in the last 4-5 songs to strictly enforce variety
+  const recentArtists = new Set();
+  const lastFourPlayed = [currentTrack, ...history.slice(0, 4)];
+  for (const t of lastFourPlayed) {
+    if (t?.artist) {
+      recentArtists.add(normalizeArtistName(t.artist));
+    }
+  }
+
+  // 3. Detect the seed track's genre family (Afrobeats, Hip-Hop, Pop, R&B, etc.)
+  const genreFamilyKey = await detectGenreFamily(currentTrack.artist, currentTrack.title);
+  const family = GENRE_FAMILIES[genreFamilyKey] || GENRE_FAMILIES.afro;
+
+  // 4. Discover candidates across the broader genre family instead of locking into one artist
+  const queries = buildGenreDiscoveryQueries(currentTrack, genreFamilyKey);
 
   let candidatePool = [];
   for (const q of queries) {
-    const results = await searchSongs(q, 15);
-    if (results && results.length > 0) {
-      candidatePool.push(...results);
-    }
-    if (candidatePool.length >= 20) break;
+    try {
+      const results = await searchSongs(q, 15);
+      if (results && results.length > 0) {
+        candidatePool.push(...results);
+      }
+      if (candidatePool.length >= 35) break;
+    } catch (_) {}
   }
 
-  // Fallback to simpler artist query if pool is empty
   if (candidatePool.length === 0) {
-    candidatePool = await searchSongs(`${currentTrack.artist} music`, 15);
+    try {
+      candidatePool = await searchSongs(`${family.name} songs audio`, 15);
+    } catch (_) {}
   }
 
-  // 3. Filter candidates: must be high-quality audio, distinct song, not in banned keys or core titles
+  // 5. Score and filter candidates based on genre alignment & artist cooldown
+  const currentArtistNorm = normalizeArtistName(currentTrack.artist);
+  const scoredCandidates = [];
+
   for (const candidate of candidatePool) {
     if (!candidate || !candidate.id) continue;
     if (historyIds.has(candidate.id)) continue;
@@ -451,7 +466,6 @@ export async function getRecommendations(currentTrack, history = []) {
     if (bannedSongKeys.has(candKey)) continue;
 
     const candCore = extractCoreTitle(candidate.title);
-    // Check if core title matches or contains any banned core title
     let matchesBannedTitle = false;
     for (const banned of bannedCoreTitles) {
       if (candCore === banned || (candCore.length > 4 && banned.includes(candCore)) || (banned.length > 4 && candCore.includes(banned))) {
@@ -461,15 +475,45 @@ export async function getRecommendations(currentTrack, history = []) {
     }
     if (matchesBannedTitle) continue;
 
-    // Found a genuinely fresh song in the same genre/vibe!
-    return candidate;
+    // Base score for any distinct track
+    let score = 50;
+
+    const candArtistNorm = normalizeArtistName(candidate.artist);
+
+    // Rule: Heavily penalize artists who appeared in the last 4 to 5 tracks
+    if (recentArtists.has(candArtistNorm)) {
+      score -= 100;
+    } else {
+      score += 25; // Bonus for a fresh, distinct artist
+    }
+
+    // Bonus for matching keywords in the genre family
+    const fullCandText = `${candidate.title} ${candidate.artist}`.toLowerCase();
+    const matchesFamily = family.keywords.some((kw) => fullCandText.includes(kw));
+    if (matchesFamily) {
+      score += 20;
+    }
+
+    // Keep candidate if score > 0
+    if (score > 0) {
+      scoredCandidates.push({ candidate, score });
+    }
   }
 
-  // 4. Last resort: pick any candidate with a different ID and non-identical title
+  // 6. Variety selection: Sort by score, take Top 5, and pick randomly to avoid deterministic queues
+  if (scoredCandidates.length > 0) {
+    scoredCandidates.sort((a, b) => b.score - a.score);
+    const topCandidates = scoredCandidates.slice(0, 5);
+    const chosen = topCandidates[Math.floor(Math.random() * topCandidates.length)].candidate;
+    return chosen;
+  }
+
+  // 7. Graceful fallback: If no candidate passed strict artist cooldown, pick any candidate with distinct title and ID
   const currentCore = extractCoreTitle(currentTrack.title);
   const fallback = candidatePool.find((t) =>
     t.id !== currentTrack.id &&
-    extractCoreTitle(t.title) !== currentCore
+    extractCoreTitle(t.title) !== currentCore &&
+    !historyIds.has(t.id)
   );
 
   return fallback || null;

@@ -292,6 +292,24 @@ body::-webkit-scrollbar {
   }
 }
 
+/* Sleek Top & Bottom Gradient Edge Mask for Search Lists (PC & Mobile) */
+#search-results-list {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0px,
+    black 14px,
+    black calc(100% - 18px),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0px,
+    black 14px,
+    black calc(100% - 18px),
+    transparent 100%
+  );
+}
+
 button, input {
   font-family: inherit;
 }
@@ -961,13 +979,24 @@ button:focus-visible, input:focus-visible {
     display: none !important;
   }
 
-  /* Mobile GPU 60fps Optimization: Disable stacked backdrop-filter blurs */
+  html, body {
+    overflow-x: hidden !important;
+    overflow-y: visible !important;
+    height: auto !important;
+  }
+
+  /* Mobile GPU 60fps Optimization: Disable stacked backdrop-filter blurs & containment scroll traps */
   .card, .dashboard-card, .rooms-card {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
     background: #14141A !important;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
-    transform: translateZ(0);
+    transform: none !important;
+    contain: none !important;
+  }
+
+  .row {
+    contain: none !important;
   }
 
   #ambient-art-bg {
@@ -1011,7 +1040,7 @@ button:focus-visible, input:focus-visible {
     margin: 4px 0 2px !important;
   }
 
-  /* Segmented Tab panels toggle logic on mobile */
+  /* Segmented Tab panels toggle logic on mobile (contained height below player) */
   .tab-panel {
     display: none !important;
     border-radius: 20px !important;
@@ -1020,6 +1049,10 @@ button:focus-visible, input:focus-visible {
   .tab-panel.active-tab-panel {
     display: flex !important;
     flex-direction: column !important;
+    height: calc(100dvh - 340px) !important;
+    min-height: 290px !important;
+    max-height: 540px !important;
+    overflow: hidden !important;
   }
 
   /* Reaction button styling on mobile */
@@ -1076,11 +1109,43 @@ button:focus-visible, input:focus-visible {
     height: 42px !important;
   }
 
-  /* Unlock mobile search scrolling across results */
-  #search-results-section,
+  /* Mobile internal card scrolling for Search & Queue */
+  #search-results-section {
+    display: flex !important;
+    flex-direction: column !important;
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    margin-top: 10px !important;
+  }
+
   #search-results-list {
-    overscroll-behavior: auto !important;
-    overflow: visible !important;
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    overscroll-behavior: contain !important;
+    touch-action: pan-y !important;
+    padding-top: 4px !important;
+    padding-bottom: 16px !important;
+  }
+
+  #queue-list {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    overscroll-behavior: contain !important;
+    touch-action: pan-y !important;
+  }
+
+  /* Unlock mobile search & queue touch scrolling across all row children */
+  #panel-search,
+  #panel-search *,
+  #search-results-section,
+  #search-results-list,
+  #queue-list,
+  #queue-list * {
     touch-action: pan-y !important;
   }
 }

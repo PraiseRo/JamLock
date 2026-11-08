@@ -997,6 +997,19 @@ function audioLog(event, detail) {
   if (audioLogBuf.length > 60) audioLogBuf.shift();
   console.log('[JamLock Audio]', event, detail !== undefined ? detail : '');
   if (AUDIO_DEBUG_PANEL) renderAudioLogPanel();
+
+  // Forward mobile audio telemetry to server terminal & /api/telemetry in real time
+  if (isMobileClient && typeof socket !== 'undefined' && socket?.connected) {
+    try {
+      socket.emit('client-audio-telemetry', {
+        event,
+        detail,
+        engine: activeEngine,
+        hidden: document.hidden,
+        state: nativeAudioSnapshot()
+      });
+    } catch (_) {}
+  }
 }
 
 function renderAudioLogPanel() {
@@ -1278,8 +1291,8 @@ function startSyncEngine() {
           nativeAudio.play().catch((e) => {
             if (!notPlayingSince) {
               notPlayingSince = Date.now();
-              logPlayReject('sync-tick', e); // logged once per stall, not every retry
-            } else if (Date.now() - notPlayingSince > 1500) showAudioPrompt(true);
+              logPlayReject('sync-tick', e);
+            }
           });
         }
       } else {
@@ -1304,10 +1317,8 @@ function startSyncEngine() {
             ytPlayer.playVideo();
           }
 
-        // Autoplay blocked? Offer a one-tap fix with zero delay
         if (!isActive) {
           if (!notPlayingSince) notPlayingSince = Date.now();
-          else if (Date.now() - notPlayingSince > 800) showAudioPrompt(true);
         } else {
           notPlayingSince = 0;
           showAudioPrompt(false);
@@ -1344,6 +1355,7 @@ function startSyncEngine() {
   if (!window._visibilityListenerAttached) {
     window._visibilityListenerAttached = true;
     const handleVisibilityOrReturn = () => {
+      audioLog('visibilitychange', { hidden: document.hidden, engine: activeEngine });
       if (document.hidden) {
         if (syncInterval) clearInterval(syncInterval);
         // If mobile browser paused <audio> on tab/app hide, immediately kick it back on
@@ -1511,7 +1523,6 @@ function loadCurrentTrack(room) {
       if (currentRoom?.playback?.isPlaying && nativeAudio.paused) {
         nativeAudio.play().catch((e) => {
           logPlayReject('loadedmetadata', e);
-          showAudioPrompt(true);
         });
       }
     };
@@ -1524,7 +1535,6 @@ function loadCurrentTrack(room) {
     if (currentRoom?.playback?.isPlaying) {
       nativeAudio.play().catch((e) => {
         logPlayReject('load', e);
-        showAudioPrompt(true);
       });
     } else {
       nativeAudio.pause();

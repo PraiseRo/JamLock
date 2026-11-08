@@ -354,6 +354,59 @@ app.get('/api/stream-source', async (req, res) => {
   }
 });
 
+// In-memory rolling ring buffer of client mobile audio telemetry events (last 100 events)
+const MOBILE_TELEMETRY_LOG = [];
+
+// API: Real-Time Mobile Telemetry View (View on your PC while testing on your phone)
+app.get('/api/telemetry', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const format = req.query.format;
+  if (format === 'json') {
+    return res.json(MOBILE_TELEMETRY_LOG);
+  }
+  // Clean HTML view for easy PC browser viewing
+  const rows = MOBILE_TELEMETRY_LOG.slice().reverse().map(item => `
+    <tr style="border-bottom: 1px solid #222; font-family: monospace; font-size: 13px;">
+      <td style="padding: 6px 10px; color: #888;">${item.time}</td>
+      <td style="padding: 6px 10px; color: #00e5ff; font-weight: bold;">${item.user || 'anon'}</td>
+      <td style="padding: 6px 10px; color: #ffeb3b; font-weight: bold;">${item.event}</td>
+      <td style="padding: 6px 10px; color: ${item.engine === 'audio' ? '#C8FF3D' : '#ff4081'}; font-weight: bold;">${item.engine}</td>
+      <td style="padding: 6px 10px; color: ${item.hidden ? '#ff5252' : '#69f0ae'}; font-weight: bold;">${item.hidden ? 'HIDDEN' : 'VISIBLE'}</td>
+      <td style="padding: 6px 10px; color: #ddd; word-break: break-all;">${item.detail}</td>
+    </tr>
+  `).join('');
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>JamLock Mobile Telemetry</title>
+      <meta http-equiv="refresh" content="2">
+      <style>body { background: #0A0A0D; color: #F4F2EA; font-family: sans-serif; padding: 20px; }</style>
+    </head>
+    <body>
+      <h2 style="color: #C8FF3D; margin-bottom: 4px;">📱 JamLock Live Mobile Audio Telemetry</h2>
+      <p style="color: #888; font-size: 13px; margin-top: 0;">Auto-refreshes every 2 seconds. Switch apps or lock your phone and observe events below.</p>
+      <table style="width: 100%; border-collapse: collapse; text-align: left; background: #141418; border-radius: 8px; overflow: hidden;">
+        <thead>
+          <tr style="background: #1c1c22; color: #aaa; font-size: 12px; text-transform: uppercase;">
+            <th style="padding: 8px 10px;">Time</th>
+            <th style="padding: 8px 10px;">User</th>
+            <th style="padding: 8px 10px;">Event</th>
+            <th style="padding: 8px 10px;">Engine</th>
+            <th style="padding: 8px 10px;">Tab State</th>
+            <th style="padding: 8px 10px;">Detail / Snapshot</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows || '<tr><td colspan="6" style="padding: 20px; text-align: center; color: #666;">No mobile telemetry received yet. Open room on phone to start streaming.</td></tr>'}
+        </tbody>
+      </table>
+    </body>
+    </html>
+  `);
+});
+
 // API: Admin Telemetry Stats (Protected with key)
 app.get('/api/admin/stats', (req, res) => {
   const adminSecret = process.env.ADMIN_SECRET || 'jamlock-secret-admin';
@@ -361,7 +414,9 @@ app.get('/api/admin/stats', (req, res) => {
   if (!providedKey || providedKey !== adminSecret) {
     return res.status(401).json({ error: 'Unauthorized: Invalid Admin Secret' });
   }
-  return res.json(metrics.getSnapshot(rooms));
+  const snapshot = metrics.getSnapshot(rooms);
+  snapshot.mobileTelemetry = MOBILE_TELEMETRY_LOG.slice(-30);
+  return res.json(snapshot);
 });
 
 // WebSocket Connection Handlers
@@ -697,6 +752,34 @@ io.on('connection', (socket) => {
         text: `Auto-Suggest ${enabled ? 'enabled' : 'disabled'}`
       });
     }
+  });
+
+  // Mobile Client Audio Telemetry for live background debugging
+  socket.on('client-audio-telemetry', (data) => {
+    if (!data) return;
+    const room = currentRoomId ? rooms.getRoom(currentRoomId) : null;
+    const user = room?.users.get(socket.id);
+    const username = user?.username || data.username || 'Mobile Guest';
+    const timeStr = new Date().toISOString().slice(11, 23);
+    const detailStr = typeof data.detail === 'object' ? JSON.stringify(data.detail) : String(data.detail || '');
+
+    const record = {
+      time: timeStr,
+      user: username,
+      event: data.event || 'unknown',
+      engine: data.engine || 'unknown',
+      hidden: Boolean(data.hidden),
+      detail: detailStr,
+      state: data.state || null
+    };
+
+    MOBILE_TELEMETRY_LOG.push(record);
+    if (MOBILE_TELEMETRY_LOG.length > 100) MOBILE_TELEMETRY_LOG.shift();
+
+    // Pretty terminal log with distinct emoji colors
+    console.log(
+      `📱 [MOBILE TELEMETRY] ${timeStr} | ${username} | event=${data.event} | engine=${data.engine} | hidden=${data.hidden} | ${detailStr}`
+    );
   });
 
   // Realtime Live Reactions with rate limiting (max 5 per 2 seconds per socket)
