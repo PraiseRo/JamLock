@@ -30,6 +30,67 @@ let syncInterval = null;
 let searchDebounceTimer = null;
 let lastKnownSyncTime = 0;
 
+// High-resolution Click-to-Sound Stopwatch Tracker
+let clickStopwatch = {
+  active: false,
+  trackId: null,
+  trackTitle: '',
+  t0: 0,
+  tWsSent: 0,
+  tRoomState: 0,
+  tEngineLoad: 0,
+  tMetadata: 0,
+  tCanPlay: 0,
+  tPlaying: 0,
+  engine: ''
+};
+
+function startClickStopwatch(song) {
+  clickStopwatch = {
+    active: true,
+    trackId: song?.id,
+    trackTitle: song?.title || 'Unknown',
+    t0: performance.now(),
+    tWsSent: performance.now(),
+    tRoomState: 0,
+    tEngineLoad: 0,
+    tMetadata: 0,
+    tCanPlay: 0,
+    tPlaying: 0,
+    engine: ''
+  };
+  console.log(`⏱️ [STOPWATCH START] Clicked "${song?.title}" at t=0ms`);
+}
+
+function recordStopwatchStep(step, detail = '') {
+  if (!clickStopwatch.active) return;
+  const elapsed = (performance.now() - clickStopwatch.t0).toFixed(0);
+  console.log(`⏱️ [STOPWATCH +${elapsed}ms] ${step} ${detail}`);
+
+  if (step === 'ROOM-STATE' && !clickStopwatch.tRoomState) {
+    clickStopwatch.tRoomState = performance.now();
+  } else if (step === 'ENGINE-LOAD' && !clickStopwatch.tEngineLoad) {
+    clickStopwatch.tEngineLoad = performance.now();
+    clickStopwatch.engine = detail;
+  } else if (step === 'METADATA' && !clickStopwatch.tMetadata) {
+    clickStopwatch.tMetadata = performance.now();
+  } else if (step === 'CANPLAY' && !clickStopwatch.tCanPlay) {
+    clickStopwatch.tCanPlay = performance.now();
+  } else if ((step === 'PLAYING' || step === 'AUDIBLE') && !clickStopwatch.tPlaying) {
+    clickStopwatch.tPlaying = performance.now();
+    clickStopwatch.active = false;
+    const totalMs = (clickStopwatch.tPlaying - clickStopwatch.t0).toFixed(0);
+    const wsMs = clickStopwatch.tRoomState ? (clickStopwatch.tRoomState - clickStopwatch.t0).toFixed(0) : '?';
+    const metaMs = clickStopwatch.tMetadata && clickStopwatch.tEngineLoad ? (clickStopwatch.tMetadata - clickStopwatch.tEngineLoad).toFixed(0) : '?';
+    const bufferMs = clickStopwatch.tPlaying && clickStopwatch.tMetadata ? (clickStopwatch.tPlaying - clickStopwatch.tMetadata).toFixed(0) : '?';
+    
+    console.log(
+      `%c🚀 [CLICK-TO-SOUND COMPLETE] Total: ${totalMs}ms | Engine: ${clickStopwatch.engine} | WS Roundtrip: ${wsMs}ms | Stream Metadata: ${metaMs}ms | Audio Buffer/Decode: ${bufferMs}ms`,
+      'background: #111; color: #C8FF3D; font-weight: bold; font-size: 13px; padding: 4px 8px; border-radius: 4px; border: 1px solid #C8FF3D;'
+    );
+  }
+}
+
 // Playback sync state
 let clockOffset = 0;            // serverNow = Date.now() + clockOffset
 let loadedTrackId = null;       // track id currently loaded in the YT player
@@ -1309,7 +1370,12 @@ if (nativeAudio) {
   // Diagnostics only: log the native audio lifecycle (no behaviour change)
   ['loadstart', 'loadedmetadata', 'canplay', 'playing', 'waiting', 'stalled', 'pause', 'ended'].forEach((ev) => {
     nativeAudio.addEventListener(ev, () => {
-      if (activeEngine === 'audio') audioLog(`audio:${ev}`, nativeAudioSnapshot());
+      if (activeEngine === 'audio') {
+        audioLog(`audio:${ev}`, nativeAudioSnapshot());
+        if (ev === 'loadedmetadata') recordStopwatchStep('METADATA', `native <audio> duration=${nativeAudio.duration?.toFixed(1)}s`);
+        if (ev === 'canplay') recordStopwatchStep('CANPLAY', `native <audio> readyState=${nativeAudio.readyState}`);
+        if (ev === 'playing') recordStopwatchStep('AUDIBLE', `native <audio> playing, currentTime=${nativeAudio.currentTime?.toFixed(2)}s`);
+      }
     });
   });
 
@@ -1438,7 +1504,11 @@ window.onYouTubeIframeAPIReady = () => {
       onStateChange: (event) => {
         if (activeEngine !== 'yt') return;
         audioLog('yt:state', event.data); // -1 unstarted, 0 ended, 1 playing, 2 paused, 3 buffering, 5 cued
+        if (event.data === YT.PlayerState.BUFFERING) {
+          recordStopwatchStep('METADATA', 'YouTube IFrame state: BUFFERING (3)');
+        }
         if (event.data === YT.PlayerState.PLAYING) {
+          recordStopwatchStep('AUDIBLE', `YouTube IFrame state: PLAYING (1), currentTime=${ytPlayer.getCurrentTime?.().toFixed(2)}s`);
           try {
             ytPlayer.unMute();
             ytPlayer.setVolume(currentVolume);
@@ -1689,6 +1759,7 @@ function fallbackToYouTubeTrack(room, reason = 'unspecified') {
     const startSec = calculateServerPosition();
     settlePending = true;
     lastSeekAt = Date.now();
+    recordStopwatchStep('ENGINE-LOAD', `yt: loadVideoById(${room.currentTrack.id}, start=${startSec.toFixed(1)}s)`);
     ytPlayer.loadVideoById({ videoId: room.currentTrack.id, startSeconds: startSec });
     setTimeout(() => {
       if (!isMuted) {
@@ -1747,6 +1818,7 @@ function loadCurrentTrack(room) {
     }
 
     const startPos = Math.max(0, calculateServerPosition());
+    recordStopwatchStep('ENGINE-LOAD', `audio: /api/audio/${encodeURIComponent(trackId)} start=${startPos.toFixed(1)}s`);
     nativeAudio.src = `/api/audio/${encodeURIComponent(trackId)}`;
     nativeAudio.muted = isMuted;
     nativeAudio.volume = Math.max(0, Math.min(1, currentVolume / 100));
@@ -2288,8 +2360,7 @@ window.handlePlayNow = (songOrEncoded) => {
     }
     if (!song) return;
 
-    const t0 = performance.now();
-    console.log(`[PLAY-NOW-CLICK] User clicked Play Now for: "${song.title}" (${song.id}) at t=0ms`);
+    startClickStopwatch(song);
 
     // Optimistic UI update: switch hero button to pause icon immediately upon click
     playIcon?.classList.add('hidden');
@@ -2474,6 +2545,7 @@ chatForm?.addEventListener('submit', (e) => {
 // --- 11. WEBSOCKET EVENTS ---
 socket.on('room-state', (roomData) => {
   currentRoom = roomData;
+  recordStopwatchStep('ROOM-STATE', `room=${roomData?.id} track="${roomData?.currentTrack?.title || 'none'}"`);
   updateClockOffset(roomData?.playback?.serverTime);
   renderRoomState(roomData);
 });
