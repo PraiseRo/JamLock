@@ -84,6 +84,51 @@
   animation: partyPulse 1s ease-out;
 }
 
+/* Socket Reconnection Top Pill Banner */
+.reconnect-banner {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 99999;
+  background: rgba(255, 90, 78, 0.95);
+  color: #0A0A0D;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 6px 16px;
+  border-radius: 999px;
+  box-shadow: 0 4px 20px rgba(255, 90, 78, 0.45), 0 0 1px rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: slideDownBanner 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: auto;
+  user-select: none;
+}
+
+@keyframes slideDownBanner {
+  0% { transform: translate(-50%, -100%); opacity: 0; }
+  100% { transform: translate(-50%, 0); opacity: 1; }
+}
+
+.reconnect-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(10, 10, 13, 0.3);
+  border-top-color: #0A0A0D;
+  border-radius: 50%;
+  animation: bannerSpin 0.7s linear infinite;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+@keyframes bannerSpin {
+  to { transform: rotate(360deg); }
+}
+
 /* Micro-Glass Action Pill (+3 Similar) */
 .similar-pill {
   height: 26px;
@@ -183,15 +228,68 @@ body {
   -ms-overflow-style: none !important;
 }
 
-/* Chrome, Safari, Edge, WebKit Mobile */
+/* Root Page Scrollbars: clean full-screen canvas */
 html::-webkit-scrollbar,
-body::-webkit-scrollbar,
-#chat-messages::-webkit-scrollbar,
-#queue-list::-webkit-scrollbar,
-#search-results-list::-webkit-scrollbar {
+body::-webkit-scrollbar {
   display: none !important;
   width: 0 !important;
   height: 0 !important;
+}
+
+/* Desktop Sleek 4px Custom Scrollbars */
+@media (hover: hover) and (pointer: fine) {
+  #chat-messages,
+  #queue-list,
+  #search-results-list {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+  }
+
+  #chat-messages::-webkit-scrollbar,
+  #queue-list::-webkit-scrollbar,
+  #search-results-list::-webkit-scrollbar {
+    display: block !important;
+    width: 5px !important;
+    height: 5px !important;
+  }
+
+  #chat-messages::-webkit-scrollbar-track,
+  #queue-list::-webkit-scrollbar-track,
+  #search-results-list::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  #chat-messages::-webkit-scrollbar-thumb,
+  #queue-list::-webkit-scrollbar-thumb,
+  #search-results-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+    transition: background 0.15s ease;
+  }
+
+  #chat-messages::-webkit-scrollbar-thumb:hover,
+  #queue-list::-webkit-scrollbar-thumb:hover,
+  #search-results-list::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.32);
+  }
+}
+
+/* Mobile Touch Scrollbars: Completely Invisible */
+@media (hover: none) and (pointer: coarse) {
+  #chat-messages,
+  #queue-list,
+  #search-results-list {
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+  }
+
+  #chat-messages::-webkit-scrollbar,
+  #queue-list::-webkit-scrollbar,
+  #search-results-list::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+  }
 }
 
 button, input {
@@ -763,8 +861,6 @@ button:focus-visible, input:focus-visible {
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   contain: layout style;
-  scrollbar-width: none !important;
-  -ms-overflow-style: none !important;
 }
 
 /* Pop-in Modal animation with GPU layer */
@@ -1181,5 +1277,15 @@ button:focus-visible, input:focus-visible {
     height: 38px !important;
     border-radius: 10px !important;
     padding: 0 !important;
+  }
+}
+
+/* Accessibility: Full prefers-reduced-motion compliance */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
   }
 }

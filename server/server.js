@@ -88,6 +88,48 @@ async function advanceTrack(roomId) {
   scheduleAutoAdvance(roomId);
 }
 
+// Background Auto-Suggest Pre-Queue: Pre-fetches and pre-warms the next recommended song
+// halfway through the current track so transitions are completely gapless with 0ms silence
+async function prepareEarlyAutoSuggest(roomId) {
+  const room = rooms.getRoom(roomId);
+  if (!room || !room.currentTrack || !room.playback?.isPlaying) return;
+  if (!room.settings?.autoSuggest) return;
+  // If queue already has tracks or already prepared for this track, skip
+  if (room.queue.length > 0) return;
+  if (room._autoSuggestedTrackId === room.currentTrack.id) return;
+
+  const currentTrackId = room.currentTrack.id;
+  room._autoSuggestedTrackId = currentTrackId;
+
+  try {
+    const recommended = await getRecommendations(room.currentTrack, room.history);
+    const activeRoom = rooms.getRoom(roomId);
+    if (!activeRoom || !activeRoom.settings?.autoSuggest) return;
+    // Ensure track has not changed and queue is still empty
+    if (activeRoom.currentTrack?.id !== currentTrackId) return;
+    if (activeRoom.queue.length > 0) return;
+
+    if (recommended) {
+      const payload = {
+        ...recommended,
+        isAutoSuggested: true,
+        addedBy: 'Auto-Suggest'
+      };
+      rooms.addToQueue(roomId, payload, false);
+      // Pre-warm audio format immediately so client transitions with 0ms delay
+      getYoutubeAudioFormat(recommended.id).catch(() => {});
+
+      io.to(roomId).emit('room-state', rooms.serializeRoom(activeRoom));
+      io.to(roomId).emit('notification', {
+        type: 'queue',
+        text: `✨ Auto-suggest queued next: ${recommended.title}`
+      });
+    }
+  } catch (err) {
+    console.warn(`[auto-suggest] background preparation error in room ${roomId}:`, err?.message || err);
+  }
+}
+
 // (Re)schedule the server-side end-of-track timer so the queue advances
 // even if the host's tab is closed or backgrounded.
 function scheduleAutoAdvance(roomId) {
@@ -97,11 +139,27 @@ function scheduleAutoAdvance(roomId) {
     clearTimeout(room.autoAdvanceTimer);
     room.autoAdvanceTimer = null;
   }
+  if (room.autoSuggestTimer) {
+    clearTimeout(room.autoSuggestTimer);
+    room.autoSuggestTimer = null;
+  }
+
   const duration = room.currentTrack?.durationSeconds || 0;
   if (!room.currentTrack || !room.playback.isPlaying || duration <= 0) return;
 
-  const remainingSec = Math.max(0, duration - rooms.getCurrentPosition(room));
+  const elapsed = rooms.getCurrentPosition(room);
+  const remainingSec = Math.max(0, duration - elapsed);
   const trackId = room.currentTrack.id;
+
+  // Background Auto-Suggest Pre-Queue: trigger at ~45% through (or 40s before finish)
+  if (room.settings?.autoSuggest && room.queue.length === 0 && room._autoSuggestedTrackId !== trackId) {
+    const triggerSec = Math.min(duration * 0.45, Math.max(0, duration - 40));
+    const delayMs = Math.max(500, Math.round((triggerSec - elapsed) * 1000));
+    room.autoSuggestTimer = setTimeout(() => {
+      room.autoSuggestTimer = null;
+      prepareEarlyAutoSuggest(roomId).catch(() => {});
+    }, delayMs);
+  }
 
   // Seamless queue transition: pre-warm upcoming queued track 25s before track ends
   if (room.queue.length > 0) {
@@ -126,12 +184,52 @@ function scheduleAutoAdvance(roomId) {
   }, remainingSec * 1000 + 800);
 }
 
+// Lightweight In-Memory Sliding Window Rate Limiter for /api/search
+// 35 requests per 60 seconds per IP
+const searchRateLimits = new Map();
+const SEARCH_WINDOW_MS = 60 * 1000;
+const SEARCH_MAX_REQ = 35;
+
+function isSearchRateLimited(ip) {
+  const now = Date.now();
+  let record = searchRateLimits.get(ip);
+  if (!record || now - record.resetTime > SEARCH_WINDOW_MS) {
+    record = { count: 1, resetTime: now };
+    searchRateLimits.set(ip, record);
+    return false;
+  }
+  record.count++;
+  if (record.count > SEARCH_MAX_REQ) {
+    return true;
+  }
+  return false;
+}
+
+// Prune stale IP rate limit records every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, record] of searchRateLimits.entries()) {
+    if (now - record.resetTime > SEARCH_WINDOW_MS) {
+      searchRateLimits.delete(ip);
+    }
+  }
+}, 10 * 60 * 1000);
+
 // API: Instant Fast Search with Cache + Predictive Background Stream Warmup
 app.get('/api/search', async (req, res) => {
-  const query = req.query.q;
-  if (!query) {
+  const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  if (isSearchRateLimited(clientIp)) {
+    res.setHeader('Retry-After', '30');
+    return res.status(429).json({ error: 'Too many search requests. Please slow down.' });
+  }
+
+  const rawQuery = String(req.query.q || '').trim();
+  if (!rawQuery) {
     return res.json([]);
   }
+  // Clamp query to max 100 characters to prevent expensive string processing attacks
+  const query = rawQuery.slice(0, 100);
+
   const startTime = Date.now();
   const results = await searchSongs(query);
   const duration = Date.now() - startTime;
@@ -212,7 +310,7 @@ io.on('connection', (socket) => {
   });
 
   // Join or Create Room
-  socket.on('join-room', ({ roomId, username, clientId, isCreating }, callback) => {
+  socket.on('join-room', ({ roomId, username, clientId, isCreating, pin }, callback) => {
     if (!roomId) {
       if (callback) callback({ success: false, error: 'Room code is required' });
       return;
@@ -243,10 +341,17 @@ io.on('connection', (socket) => {
       return;
     }
 
-    currentRoomId = cleanId;
+    const joinRes = rooms.addUser(cleanId, socket.id, cleanUsername, clientId, pin);
+    if (joinRes?.error) {
+      if (callback) {
+        callback({ success: false, error: joinRes.message || 'Access denied' });
+      }
+      return;
+    }
 
+    currentRoomId = cleanId;
     socket.join(cleanId);
-    const { room, user, isNewUser } = rooms.addUser(cleanId, socket.id, cleanUsername, clientId);
+    const { room, user, isNewUser } = joinRes;
 
     // Record Telemetry
     if (clientId) metrics.recordVisitor(clientId);
@@ -432,11 +537,18 @@ io.on('connection', (socket) => {
       return;
     }
 
-    room.settings = { ...room.settings, ...newSettings };
+    if (newSettings) {
+      if (typeof newSettings.pin !== 'undefined') {
+        const cleanPin = newSettings.pin ? String(newSettings.pin).trim().slice(0, 8) : null;
+        room.pin = cleanPin;
+        room.settings.pin = cleanPin;
+      }
+      room.settings = { ...room.settings, ...newSettings, pin: room.pin };
+    }
     io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
     io.to(currentRoomId).emit('notification', {
       type: 'info',
-      text: 'Room permissions updated'
+      text: 'Room settings & permissions updated'
     });
   });
 
@@ -493,6 +605,15 @@ io.on('connection', (socket) => {
     const room = rooms.getRoom(currentRoomId);
     if (room) {
       room.settings.autoSuggest = Boolean(enabled);
+      if (!room.settings.autoSuggest) {
+        if (room.autoSuggestTimer) {
+          clearTimeout(room.autoSuggestTimer);
+          room.autoSuggestTimer = null;
+        }
+        rooms.evictAutoSuggestedTracks(currentRoomId);
+      } else {
+        scheduleAutoAdvance(currentRoomId);
+      }
       io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
       io.to(currentRoomId).emit('notification', {
         type: 'info',
@@ -621,6 +742,43 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Host Kick / Eviction Moderation
+  socket.on('kick-user', ({ targetClientId }) => {
+    if (!currentRoomId || !targetClientId) return;
+    const kickResult = rooms.kickUser(currentRoomId, socket.id, targetClientId);
+    if (!kickResult) return;
+
+    const { room, targetUser, socketIds } = kickResult;
+    for (const sId of socketIds) {
+      io.to(sId).emit('you-were-kicked', { message: 'You were removed by the room host.' });
+      const s = io.sockets.sockets.get(sId);
+      if (s) {
+        s.leave(currentRoomId);
+      }
+    }
+
+    io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
+    io.to(currentRoomId).emit('notification', {
+      type: 'info',
+      text: `Host removed ${targetUser.username} from the room`
+    });
+  });
+
+  // In-Room Username Rename
+  socket.on('change-username', ({ newUsername }) => {
+    if (!currentRoomId || !newUsername) return;
+    const res = rooms.changeUsername(currentRoomId, socket.id, newUsername);
+    if (!res) return;
+
+    const { room, user } = res;
+    io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
+    socket.emit('username-changed', { username: user.username });
+    io.to(currentRoomId).emit('notification', {
+      type: 'info',
+      text: `Username updated to "${user.username}"`
+    });
+  });
+
   // Request sync timestamp
   socket.on('sync-request', (callback) => {
     if (!currentRoomId) return;
@@ -713,6 +871,24 @@ app.get('/r/:roomId', (req, res) => {
   } catch (err) {
     return res.sendFile(indexPath);
   }
+});
+
+// Search Engine Crawlers & Sitemaps
+app.get('/robots.txt', (req, res) => {
+  res.type('text/plain');
+  res.send('User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: https://jamlock.onrender.com/sitemap.xml\n');
+});
+
+app.get('/sitemap.xml', (req, res) => {
+  res.type('application/xml');
+  res.send(`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://jamlock.onrender.com/</loc>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>`);
 });
 
 // Fallback to SPA index.html (except /admin)

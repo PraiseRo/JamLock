@@ -3,6 +3,23 @@
 class RoomManager {
   constructor() {
     this.rooms = new Map();
+    // Background periodic sweep for abandoned empty rooms (runs every 5 min)
+    setInterval(() => {
+      this.cleanupExpiredRooms();
+    }, 5 * 60 * 1000);
+  }
+
+  cleanupExpiredRooms(emptyTtlMs = 10 * 60 * 1000) {
+    const now = Date.now();
+    for (const [roomId, room] of this.rooms.entries()) {
+      if (room.users.size === 0) {
+        if (!room.emptySince) {
+          room.emptySince = now;
+        } else if (now - room.emptySince >= emptyTtlMs) {
+          this.rooms.delete(roomId);
+        }
+      }
+    }
   }
 
   getOrCreateRoom(roomId) {
@@ -11,6 +28,7 @@ class RoomManager {
       this.rooms.set(id, {
         id,
         createdAt: Date.now(),
+        emptySince: null,
         users: new Map(), // socketId -> { id, username, isHost, avatarColor }
         currentTrack: null, // { id, title, artist, duration, durationSeconds, thumbnail, addedBy }
         queue: [], // Array of tracks
@@ -23,10 +41,13 @@ class RoomManager {
         chat: [], // Last 50 messages: { id, user, text, timestamp }
         trackReactions: [], // Pinned timeline reactions for current track: { id, emoji, positionSec, username, color }
         skipVotes: new Set(), // Set of clientIds who voted to skip current track
+        pin: null, // Optional room access PIN
         settings: {
           djMode: 'anyone', // 'anyone' | 'host-only'
+          queueMode: 'anyone', // 'anyone' | 'host-only'
           autoSuggest: true, // Automatic smart recommendation when queue ends
-          theme: 'electric' // 'electric' | 'cyber' | 'sunset' | 'midnight'
+          theme: 'electric', // 'electric' | 'cyber' | 'sunset' | 'midnight'
+          pin: null
         }
       });
     }
@@ -43,10 +64,25 @@ class RoomManager {
     return this.rooms.has(roomId.trim().toUpperCase());
   }
 
-  addUser(roomId, socketId, username, clientId) {
+  addUser(roomId, socketId, username, clientId, providedPin) {
     const room = this.getOrCreateRoom(roomId);
+    room.emptySince = null;
     const resolvedClientId = clientId || socketId;
     const isFirstUser = room.users.size === 0;
+
+    // Verify room PIN if room is private and requester is not already recognized
+    if (room.pin && !isFirstUser) {
+      let isExistingRecognizedUser = false;
+      for (const u of room.users.values()) {
+        if (u.clientId === resolvedClientId) {
+          isExistingRecognizedUser = true;
+          break;
+        }
+      }
+      if (!isExistingRecognizedUser && String(providedPin || '').trim() !== String(room.pin).trim()) {
+        return { error: 'invalid_pin', message: 'This room is private. Incorrect or missing PIN.' };
+      }
+    }
 
     // Check if user already exists from another tab in the same browser
     let existingUser = null;
@@ -71,9 +107,18 @@ class RoomManager {
     const colors = ['#f43f5e', '#ec4899', '#d946ef', '#a855f7', '#8b5cf6', '#6366f1', '#3b82f6', '#06b6d4', '#10b981', '#f59e0b'];
     const avatarColor = colors[Math.floor(Math.random() * colors.length)];
 
+    let baseUsername = (username || `Guest #${Math.floor(1000 + Math.random() * 9000)}`).trim();
+    // Disambiguate duplicate display names in the same room (e.g. Alex, Alex #2)
+    const existingNames = new Set(Array.from(room.users.values()).map(u => u.username?.toLowerCase()));
+    let finalUsername = baseUsername;
+    let counter = 2;
+    while (existingNames.has(finalUsername.toLowerCase())) {
+      finalUsername = `${baseUsername} #${counter++}`;
+    }
+
     const user = {
       clientId: resolvedClientId,
-      username: username || `Guest #${Math.floor(1000 + Math.random() * 9000)}`,
+      username: finalUsername,
       isHost: isFirstUser,
       avatarColor,
       sockets: new Set([socketId]),
@@ -129,6 +174,7 @@ class RoomManager {
 
         // Clean up empty rooms after 10 minutes
         if (room.users.size === 0) {
+          room.emptySince = Date.now();
           setTimeout(() => {
             if (room.users.size === 0) {
               this.rooms.delete(roomId);
@@ -181,6 +227,7 @@ class RoomManager {
     }
 
     room.currentTrack = track;
+    room._autoSuggestedTrackId = null;
     room.trackReactions = [];
     room.skipVotes = new Set();
     room.playback = {
@@ -221,10 +268,26 @@ class RoomManager {
 
     if (playNext) {
       room.queue.unshift(track);
+    } else if (!track.isAutoSuggested) {
+      // Human tracks take priority: place before any auto-suggested filler tracks
+      const autoIndex = room.queue.findIndex(t => t.isAutoSuggested);
+      if (autoIndex !== -1) {
+        room.queue.splice(autoIndex, 0, track);
+      } else {
+        room.queue.push(track);
+      }
     } else {
       room.queue.push(track);
     }
     return room;
+  }
+
+  evictAutoSuggestedTracks(roomId) {
+    const room = this.getRoom(roomId);
+    if (!room) return null;
+    const initialLen = room.queue.length;
+    room.queue = room.queue.filter(t => !t.isAutoSuggested);
+    return room.queue.length !== initialLen ? room : null;
   }
 
   removeFromQueue(roomId, trackIndex) {
@@ -300,6 +363,52 @@ class RoomManager {
     return message;
   }
 
+  kickUser(roomId, hostSocketId, targetClientId) {
+    const room = this.getRoom(roomId);
+    if (!room) return null;
+    const hostUser = room.users.get(hostSocketId);
+    if (!hostUser || !hostUser.isHost) return null;
+
+    let targetUser = null;
+    for (const u of room.users.values()) {
+      if (u.clientId === targetClientId) {
+        targetUser = u;
+        break;
+      }
+    }
+    if (!targetUser || targetUser.isHost) return null;
+
+    const socketIds = targetUser.sockets ? Array.from(targetUser.sockets) : [];
+    for (const sId of socketIds) {
+      room.users.delete(sId);
+    }
+    return { room, targetUser, socketIds };
+  }
+
+  changeUsername(roomId, socketId, newUsername) {
+    const room = this.getRoom(roomId);
+    if (!room) return null;
+    const user = room.users.get(socketId);
+    if (!user) return null;
+
+    const clean = String(newUsername || '').trim().slice(0, 25);
+    if (!clean) return null;
+
+    const existingNames = new Set(
+      Array.from(room.users.values())
+        .filter(u => u.clientId !== user.clientId)
+        .map(u => u.username?.toLowerCase())
+    );
+    let finalName = clean;
+    let counter = 2;
+    while (existingNames.has(finalName.toLowerCase())) {
+      finalName = `${clean} #${counter++}`;
+    }
+
+    user.username = finalName;
+    return { room, user };
+  }
+
   serializeRoom(room) {
     if (!room) return null;
     return {
@@ -313,7 +422,12 @@ class RoomManager {
         positionSec: this.getCurrentPosition(room),
         serverTime: Date.now()
       },
-      settings: room.settings,
+      settings: {
+        ...room.settings,
+        hasPin: Boolean(room.pin),
+        pin: room.pin || null
+      },
+      chat: (room.chat || []).slice(-50),
       trackReactions: room.trackReactions || [],
       skipVotes: {
         count: room.skipVotes ? room.skipVotes.size : 0,

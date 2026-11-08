@@ -37,10 +37,15 @@ let lastRtt = 0;                 // RTT of the best clock-sync sample (debug)
 
 // Rough one-sample offset. Only used until the measured sync below completes,
 // because a single message sample ignores network latency and is very jittery.
+// Clock offset tracker with exponential moving average drift correction
 function updateClockOffset(serverTime) {
-  if (clockSynced) return;
-  if (typeof serverTime === 'number' && !isNaN(serverTime)) {
-    clockOffset = serverTime - Date.now();
+  if (typeof serverTime !== 'number' || isNaN(serverTime)) return;
+  const rawOffset = serverTime - Date.now();
+  if (!clockSynced) {
+    clockOffset = rawOffset;
+  } else {
+    // Continuous gentle EWMA adjustment (weight 0.05) to correct long-term drift without phase jumps
+    clockOffset = clockOffset * 0.95 + rawOffset * 0.05;
   }
 }
 
@@ -69,7 +74,89 @@ function syncClock() {
   };
   sendOne();
 }
-socket.on('connect', syncClock);
+
+// --- Socket Reconnection & Connection Lifecycle Management ---
+let reconnectBanner = null;
+
+function ensureReconnectBanner() {
+  if (!reconnectBanner) {
+    reconnectBanner = document.createElement('div');
+    reconnectBanner.id = 'reconnect-banner';
+    reconnectBanner.className = 'reconnect-banner hidden';
+    reconnectBanner.innerHTML = `
+      <span class="reconnect-spinner"></span>
+      <span id="reconnect-status-text">Connection lost. Reconnecting...</span>
+    `;
+    document.body.appendChild(reconnectBanner);
+  }
+  return reconnectBanner;
+}
+
+function showReconnectBanner(text) {
+  const banner = ensureReconnectBanner();
+  const textEl = document.getElementById('reconnect-status-text');
+  if (textEl && text) textEl.textContent = text;
+  banner.classList.remove('hidden');
+}
+
+function hideReconnectBanner() {
+  if (reconnectBanner) {
+    reconnectBanner.classList.add('hidden');
+  }
+}
+
+socket.on('disconnect', (reason) => {
+  console.warn('[socket] Disconnected:', reason);
+  showReconnectBanner('Connection lost. Reconnecting...');
+  if (reason === 'io server disconnect') {
+    socket.connect();
+  }
+});
+
+socket.on('connect_error', (err) => {
+  console.warn('[socket] Connect error:', err?.message || err);
+  showReconnectBanner('Network unreachable. Retrying connection...');
+});
+
+socket.on('reconnect_attempt', (attempt) => {
+  showReconnectBanner(`Reconnecting to room... (attempt ${attempt})`);
+});
+
+socket.on('reconnect_failed', () => {
+  showReconnectBanner('Unable to reconnect. Click here to retry.');
+  if (reconnectBanner) {
+    reconnectBanner.onclick = () => {
+      socket.connect();
+      showReconnectBanner('Retrying connection...');
+    };
+  }
+});
+
+socket.on('connect', () => {
+  console.log('[socket] Connected to server');
+  hideReconnectBanner();
+  syncClock();
+
+  // If client was inside an active room, automatically re-join with same identity
+  const activeRoomId = currentRoom?.id || localStorage.getItem('jamlock_current_room');
+  const savedUser = currentUser?.username || localStorage.getItem('jamlock_username');
+  if (activeRoomId && savedUser) {
+    const clientId = getBrowserClientId();
+    socket.emit('join-room', { roomId: activeRoomId, username: savedUser, clientId, isCreating: false }, (res) => {
+      if (res?.success) {
+        currentUser = res.user;
+        currentRoom = res.room;
+        if (res.room) {
+          renderRoomState(res.room);
+          startSyncEngine();
+        }
+      } else if (res?.error && res.error.includes('does not exist')) {
+        showToast('Room has ended or expired.', 'info');
+        leaveRoom();
+      }
+    });
+  }
+});
 setInterval(syncClock, 30000);
 
 // Reaction Counts State
@@ -139,6 +226,8 @@ const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
 const reactionsContainer = document.getElementById('reactions-container');
+const renderedChatIds = new Set();
+let lastRenderedChatRoomId = null;
 
 // Settings & Leave Modals DOM
 const hostSettingsBtn = document.getElementById('host-settings-btn');
@@ -148,6 +237,7 @@ const saveSettingsBtn = document.getElementById('save-settings-btn');
 const settingDjMode = document.getElementById('setting-dj-mode');
 const settingQueueMode = document.getElementById('setting-queue-mode');
 const settingTheme = document.getElementById('setting-theme');
+const settingRoomPin = document.getElementById('setting-room-pin');
 const leaveConfirmModal = document.getElementById('leave-confirm-modal');
 const cancelLeaveBtn = document.getElementById('cancel-leave-btn');
 const confirmLeaveBtn = document.getElementById('confirm-leave-btn');
@@ -360,9 +450,11 @@ function updateWaveformProgress(progressPercent) {
 
 // --- 2. VOLUME CONTROLS ---
 const nativeAudio = document.getElementById('native-audio-player');
-// Default engine: If hosted on Render/cloud, YouTube direct iframe is 100% reliable without datacenter proxy blocks
+const isMobileClient = /mobile|android|iphone|ipad|ipod/i.test(navigator.userAgent);
+// Default engine: On desktop cloud, YouTube direct iframe is 100% reliable without proxy stalls.
+// On mobile devices, default to native <audio> so background playback and lock-screen controls work without OS suspension.
 const isCloudHosted = window.location.hostname.includes('render.com') || window.location.hostname.includes('koyeb') || window.location.hostname.includes('railway');
-let activeEngine = isCloudHosted ? 'yt' : 'audio'; // 'audio' (native HTML5 <audio>) | 'yt' (YouTube IFrame)
+let activeEngine = (isCloudHosted && !isMobileClient) ? 'yt' : 'audio'; // 'audio' (native HTML5 <audio>) | 'yt' (YouTube IFrame)
 let currentVolume = parseInt(localStorage.getItem('jamlock_volume') || localStorage.getItem('beatsync_volume') || '100', 10);
 let isMuted = false;
 
@@ -497,36 +589,55 @@ window.addEventListener('DOMContentLoaded', () => {
   });
 
   if (targetRoom) {
-    if (joinCodeInput) joinCodeInput.value = targetRoom.toUpperCase();
-    if (savedName) {
-      joinRoom(targetRoom.toUpperCase(), savedName);
-    } else {
-      document.documentElement.classList.remove('in-room-loading');
-      // If arriving directly via ?room= invite link without a username, present Quick Join Modal
-      if (roomParam && quickJoinModal) {
-        if (quickJoinRoomCode) quickJoinRoomCode.textContent = targetRoom.toUpperCase();
-        if (quickJoinUsername) quickJoinUsername.value = getRandomNickname();
-        quickJoinModal.classList.remove('hidden');
-        quickJoinModal.style.display = 'flex';
-        setTimeout(() => {
-          quickJoinUsername?.focus();
-          quickJoinUsername?.select();
-        }, 150);
+    const cleanRoomCode = targetRoom.toUpperCase();
+    if (joinCodeInput) joinCodeInput.value = cleanRoomCode;
 
-        quickJoinForm?.addEventListener('submit', (ev) => {
-          ev.preventDefault();
-          const chosenName = quickJoinUsername?.value.trim() || getRandomNickname();
-          localStorage.setItem('jamlock_username', chosenName);
-          if (usernameInput) usernameInput.value = chosenName;
-          quickJoinModal.classList.add('hidden');
-          quickJoinModal.style.display = 'none';
-          joinRoom(targetRoom.toUpperCase(), chosenName);
-        });
-      } else {
-        usernameInput?.focus();
-        showToast(`Enter your display name to enter room ${targetRoom.toUpperCase()}`, 'info');
-      }
-    }
+    // Pre-flight check: ensure room exists before asking for username or attempting to join
+    fetch(`/api/room/${cleanRoomCode}`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Room not found');
+        return res.json();
+      })
+      .then(() => {
+        if (savedName) {
+          joinRoom(cleanRoomCode, savedName);
+        } else {
+          document.documentElement.classList.remove('in-room-loading');
+          if (roomParam && quickJoinModal) {
+            if (quickJoinRoomCode) quickJoinRoomCode.textContent = cleanRoomCode;
+            if (quickJoinUsername) quickJoinUsername.value = getRandomNickname();
+            quickJoinModal.classList.remove('hidden');
+            quickJoinModal.style.display = 'flex';
+            setTimeout(() => {
+              quickJoinUsername?.focus();
+              quickJoinUsername?.select();
+            }, 150);
+
+            quickJoinForm?.addEventListener('submit', (ev) => {
+              ev.preventDefault();
+              const chosenName = quickJoinUsername?.value.trim() || getRandomNickname();
+              localStorage.setItem('jamlock_username', chosenName);
+              if (usernameInput) usernameInput.value = chosenName;
+              quickJoinModal.classList.add('hidden');
+              quickJoinModal.style.display = 'none';
+              joinRoom(cleanRoomCode, chosenName);
+            });
+          } else {
+            usernameInput?.focus();
+            showToast(`Enter your display name to enter room ${cleanRoomCode}`, 'info');
+          }
+        }
+      })
+      .catch(() => {
+        // Room does not exist or has expired
+        document.documentElement.classList.remove('in-room-loading');
+        localStorage.removeItem('jamlock_current_room');
+        localStorage.removeItem('beatsync_current_room');
+        if (window.location.pathname.startsWith('/r/')) {
+          window.history.replaceState({}, '', '/');
+        }
+        showToast(`Room "${cleanRoomCode}" has ended or does not exist.`, 'info');
+      });
   }
 });
 
@@ -591,7 +702,7 @@ function getBrowserClientId() {
   return cid;
 }
 
-function joinRoom(roomId, explicitUsername, isCreating = false) {
+function joinRoom(roomId, explicitUsername, isCreating = false, pin = null) {
   const username = explicitUsername || usernameInput?.value.trim();
   if (!username) {
     requireValidUsername();
@@ -601,7 +712,7 @@ function joinRoom(roomId, explicitUsername, isCreating = false) {
 
   const clientId = getBrowserClientId();
 
-  socket.emit('join-room', { roomId, username, clientId, isCreating }, (response) => {
+  socket.emit('join-room', { roomId, username, clientId, isCreating, pin }, (response) => {
     if (response?.success) {
       currentUser = response.user;
       currentRoom = response.room;
@@ -623,6 +734,13 @@ function joinRoom(roomId, explicitUsername, isCreating = false) {
       showToast(`Connected to room ${roomId}`, 'success');
     } else if (response?.error) {
       document.documentElement.classList.remove('in-room-loading');
+      if (response.error.toLowerCase().includes('pin')) {
+        const userPin = prompt('This room is private. Please enter the room PIN:');
+        if (userPin) {
+          joinRoom(roomId, username, isCreating, userPin.trim());
+          return;
+        }
+      }
       localStorage.removeItem('jamlock_current_room');
       localStorage.removeItem('beatsync_current_room');
       if (window.location.search) {
@@ -651,11 +769,25 @@ confirmLeaveBtn?.addEventListener('click', () => {
   localStorage.removeItem('beatsync_current_room');
   document.documentElement.classList.remove('in-room-loading');
   document.body.classList.remove('in-room-mode');
-  window.location.href = window.location.origin + window.location.pathname;
+  currentRoom = null;
+  if (typeof renderedChatIds !== 'undefined') renderedChatIds.clear();
+  if (chatMessages) chatMessages.innerHTML = '';
+  // Clean URL history to root so reloading or back button never re-joins
+  window.history.replaceState({}, '', '/');
+  window.location.href = window.location.origin + '/';
 });
 
 // Instant departure notification if user closes or navigates away
 window.addEventListener('beforeunload', () => {
+  if (currentRoom) {
+    try {
+      socket.emit('leave-room');
+    } catch (e) {}
+  }
+});
+
+// Mobile Safari/Chrome support: pagehide fires reliably on mobile navigation or tab close
+window.addEventListener('pagehide', () => {
   if (currentRoom) {
     try {
       socket.emit('leave-room');
@@ -695,6 +827,7 @@ hostSettingsBtn?.addEventListener('click', () => {
     if (settingDjMode) settingDjMode.value = currentRoom.settings.djMode || 'anyone';
     if (settingQueueMode) settingQueueMode.value = currentRoom.settings.queueMode || 'anyone';
     if (settingTheme) settingTheme.value = currentRoom.settings.theme || 'electric';
+    if (settingRoomPin) settingRoomPin.value = currentRoom.settings.pin || '';
   }
   settingsModal?.classList.remove('hidden');
 });
@@ -707,13 +840,13 @@ saveSettingsBtn?.addEventListener('click', () => {
   socket.emit('update-room-settings', {
     djMode: settingDjMode?.value || 'anyone',
     queueMode: settingQueueMode?.value || 'anyone',
-    theme: settingTheme?.value || 'electric'
+    theme: settingTheme?.value || 'electric',
+    pin: settingRoomPin ? settingRoomPin.value.trim() : null
   });
   settingsModal?.classList.add('hidden');
 });
 
 // --- 6. SYNCHRONIZATION, HYBRID AUDIO ENGINE & LOCK-SCREEN MEDIA SESSION ---
-const isMobileClient = /mobile|android|iphone|ipad|ipod/i.test(navigator.userAgent);
 const DRIFT_HARD_SEEK_SEC = 0.4;   // Native <audio> drift threshold
 // On cloud/mobile YouTube, use 1.25s tolerance to eliminate audio micro-stutters from coarse timer quantization
 const DRIFT_YT_SEEK_SEC = (isCloudHosted || isMobileClient) ? 1.25 : 0.6;
@@ -775,10 +908,21 @@ function setupMediaSessionHandlers() {
   };
   safeSet('play', () => {
     if (!currentRoom?.currentTrack) return;
+    // Direct audio engine unpause when triggered from OS lock-screen
+    if (activeEngine === 'audio' && nativeAudio && nativeAudio.paused) {
+      nativeAudio.play().catch(() => {});
+    } else if (activeEngine === 'yt' && ytReady && ytPlayer) {
+      try { ytPlayer.playVideo(); } catch (e) {}
+    }
     socket.emit('play', { positionSec: calculateServerPosition() });
   });
   safeSet('pause', () => {
     if (!currentRoom?.currentTrack) return;
+    if (activeEngine === 'audio' && nativeAudio && !nativeAudio.paused) {
+      nativeAudio.pause();
+    } else if (activeEngine === 'yt' && ytReady && ytPlayer) {
+      try { ytPlayer.pauseVideo(); } catch (e) {}
+    }
     socket.emit('pause', { positionSec: calculateServerPosition() });
   });
   safeSet('nexttrack', () => {
@@ -858,7 +1002,7 @@ async function probeAudioEndpoint(trackId) {
 // that case is handled by the "Tap to Tune In" prompt.
 let nativeAudioFailed = false;
 let nativeStallTimer = null;
-const NATIVE_STALL_MS = 6000;
+const NATIVE_STALL_MS = isMobileClient ? 2500 : 4000;
 
 function disarmNativeStallWatchdog() {
   if (nativeStallTimer) {
@@ -1246,9 +1390,12 @@ function loadCurrentTrack(room) {
   updateMediaSessionMetadata(track);
   syncWakeLock(Boolean(room.playback?.isPlaying));
 
-  // If on cloud (Render) or native has failed, play via YouTube immediately within user click gesture
-  if (isCloudHosted || nativeAudioFailed || !nativeAudio) {
-    fallbackToYouTubeTrack(room, isCloudHosted ? 'cloud-direct-yt' : 'native-disabled-this-session');
+  // On desktop cloud hosting, YouTube direct iframe is used for zero-proxy overhead.
+  // On mobile clients, attempt native <audio> first so music keeps playing in background and lock-screen!
+  // If native audio is not supported or failed, fallback to YouTube iframe immediately.
+  const bypassNative = isCloudHosted && !isMobileClient;
+  if (bypassNative || nativeAudioFailed || !nativeAudio) {
+    fallbackToYouTubeTrack(room, bypassNative ? 'cloud-direct-yt' : 'native-disabled-this-session');
     return;
   }
 
@@ -1509,34 +1656,51 @@ function applyRoomPlayback(playback) {
   }
 }
 
-// Audio Fade In / Out
+// Audio Fade In / Out (Dual Engine: YouTube + HTML5 Native Audio)
 let volumeFadeTimer = null;
 function fadeAudio(targetVolume, durationMs = 350, onComplete) {
-  if (!ytReady || !ytPlayer || typeof ytPlayer.getVolume !== 'function') {
+  const hasYt = ytReady && ytPlayer && typeof ytPlayer.getVolume === 'function';
+  const hasNative = nativeAudio && !nativeAudio.paused;
+
+  if (!hasYt && !hasNative) {
     if (onComplete) onComplete();
     return;
   }
   if (volumeFadeTimer) clearInterval(volumeFadeTimer);
 
-  const startVolume = ytPlayer.getVolume();
+  const startYtVolume = hasYt ? ytPlayer.getVolume() : targetVolume;
+  const startNativeVol = hasNative ? nativeAudio.volume : (targetVolume / 100);
+  const targetNativeVol = Math.max(0, Math.min(1, targetVolume / 100));
+
   const stepCount = 12;
   const interval = durationMs / stepCount;
-  const delta = (targetVolume - startVolume) / stepCount;
+  const deltaYt = (targetVolume - startYtVolume) / stepCount;
+  const deltaNative = (targetNativeVol - startNativeVol) / stepCount;
   let currentStep = 0;
 
   volumeFadeTimer = setInterval(() => {
     currentStep++;
-    const newVol = Math.round(startVolume + delta * currentStep);
-    try {
-      ytPlayer.setVolume(Math.max(0, Math.min(100, newVol)));
-    } catch (e) {}
+    if (hasYt) {
+      try {
+        const newYtVol = Math.round(startYtVolume + deltaYt * currentStep);
+        ytPlayer.setVolume(Math.max(0, Math.min(100, newYtVol)));
+      } catch (e) {}
+    }
+    if (hasNative) {
+      try {
+        nativeAudio.volume = Math.max(0, Math.min(1, startNativeVol + deltaNative * currentStep));
+      } catch (e) {}
+    }
 
     if (currentStep >= stepCount) {
       clearInterval(volumeFadeTimer);
       volumeFadeTimer = null;
-      try {
-        ytPlayer.setVolume(targetVolume);
-      } catch (e) {}
+      if (hasYt) {
+        try { ytPlayer.setVolume(targetVolume); } catch (e) {}
+      }
+      if (hasNative) {
+        try { nativeAudio.volume = targetNativeVol; } catch (e) {}
+      }
       if (onComplete) onComplete();
     }
   }, interval);
@@ -1620,13 +1784,14 @@ inlineSearchInput?.addEventListener('input', (e) => {
     return;
   }
 
-  // Show skeleton placeholder rows while fetching
-  renderSearchSkeletons();
-  searchSpinner?.classList.remove('hidden');
   if (searchAbortController) searchAbortController.abort();
   searchAbortController = new AbortController();
 
   searchDebounceTimer = setTimeout(async () => {
+    // Show skeleton placeholder rows right before network fetch
+    renderSearchSkeletons();
+    searchSpinner?.classList.remove('hidden');
+
     try {
       const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, {
         signal: searchAbortController.signal
@@ -1639,7 +1804,7 @@ inlineSearchInput?.addEventListener('input', (e) => {
     } finally {
       searchSpinner?.classList.add('hidden');
     }
-  }, 260);
+  }, 280);
 });
 
 function renderSearchSkeletons(count = 4) {
@@ -1750,7 +1915,7 @@ window.handlePlayNow = (songEncodedStr) => {
     const song = JSON.parse(decodeURIComponent(songEncodedStr));
 
     // Optimistic audio pipeline preload within user click gesture for instant playback
-    if (nativeAudio && song?.id && !isCloudHosted && !nativeAudioFailed) {
+    if (nativeAudio && song?.id && (!isCloudHosted || isMobileClient) && !nativeAudioFailed) {
       const audioUrl = `/api/audio/${encodeURIComponent(song.id)}`;
       if (!nativeAudio.src.endsWith(audioUrl)) {
         nativeAudio.src = audioUrl;
@@ -2063,6 +2228,14 @@ socket.on('skip-votes-updated', ({ votes, required }) => {
       skipVotePill.classList.add('hidden');
     }
   }
+  if (skipBtn) {
+    const isHost = currentRoom && currentRoom.hostId === currentUserId;
+    if (isHost) {
+      skipBtn.title = 'Skip Track (Host override)';
+    } else {
+      skipBtn.title = `Vote to skip (${votes || 0} of ${required || 1} votes needed)`;
+    }
+  }
 });
 
 let activeMobileTabName = 'queue';
@@ -2103,9 +2276,61 @@ socket.on('host-changed', ({ newHost }) => {
   }
 });
 
+socket.on('you-were-kicked', ({ message }) => {
+  showToast(message || 'You were removed by the room host.', 'error');
+  localStorage.removeItem('jamlock_current_room');
+  leaveRoom();
+});
+
+socket.on('username-changed', ({ username }) => {
+  if (currentUser) currentUser.username = username;
+  localStorage.setItem('jamlock_username', username);
+  if (usernameInput) usernameInput.value = username;
+  showToast(`Your name is now "${username}"`, 'success');
+});
+
+// Member list interactive actions (Rename self & Host-Kick moderation)
+if (usersStrip) {
+  usersStrip.addEventListener('click', (e) => {
+    const targetPill = e.target.closest('.member-avatar-pill');
+    if (!targetPill || !currentRoom) return;
+
+    const isMe = targetPill.dataset.isMe === 'true';
+    const targetUsername = targetPill.dataset.username;
+    const targetClientId = targetPill.dataset.clientId;
+    const isTargetHost = targetPill.dataset.isHost === 'true';
+
+    if (isMe) {
+      const newName = prompt('Enter your new display name:', currentUser?.username || '');
+      if (newName && newName.trim() && newName.trim() !== currentUser?.username) {
+        socket.emit('change-username', { newUsername: newName.trim() });
+      }
+    } else if (currentUser?.isHost && !isTargetHost) {
+      const confirmKick = confirm(`Remove "${targetUsername}" from this room?`);
+      if (confirmKick) {
+        socket.emit('kick-user', { targetClientId });
+      }
+    }
+  });
+}
+
 // --- 12. UI STATE RENDERING ---
 function renderRoomState(room) {
   if (!room) return;
+
+  // Room switch: reset chat cache if entered a new room
+  if (room.id && lastRenderedChatRoomId !== room.id) {
+    lastRenderedChatRoomId = room.id;
+    renderedChatIds.clear();
+    if (chatMessages) chatMessages.innerHTML = '';
+  }
+
+  // Hydrate chat messages from server state (persists chat across page refreshes)
+  if (Array.isArray(room.chat) && chatMessages) {
+    room.chat.forEach((msg) => {
+      appendChatMessage(msg);
+    });
+  }
 
   // Sync current user's host status with room user list
   if (currentUser && Array.isArray(room.users)) {
@@ -2121,13 +2346,17 @@ function renderRoomState(room) {
     listeningCountDisplay.textContent = count === 1 ? '1 listening' : `${count} listening`;
   }
 
-  // User Avatars Strip
+  // User Avatars Strip with Interactive Actions (Self-Rename & Host-Kick)
   if (usersStrip) {
-    usersStrip.innerHTML = room.users.map((u, i) => `
-      <span class="av" style="background: ${u.avatarColor}; margin-left: ${i > 0 ? '-8px' : '0'}; border: 2px solid #0A0A0D" title="${escapeHtml(u.username)} ${u.isHost ? '(Host)' : ''}">
-        ${u.username.charAt(0).toUpperCase()}
-      </span>
-    `).join('');
+    usersStrip.innerHTML = room.users.map((u, i) => {
+      const isMe = currentUser && (u.clientId === currentUser.clientId || u.username === currentUser.username);
+      const isHostUser = u.isHost;
+      return `
+        <span class="av member-avatar-pill" data-client-id="${escapeHtml(u.clientId || '')}" data-username="${escapeHtml(u.username)}" data-is-me="${isMe}" data-is-host="${isHostUser}" style="background: ${u.avatarColor}; margin-left: ${i > 0 ? '-8px' : '0'}; border: 2px solid #0A0A0D; cursor: pointer; position: relative" title="${escapeHtml(u.username)} ${isHostUser ? '(Host)' : ''}${isMe ? ' (You - Click to Rename)' : (currentUser?.isHost ? ' (Click to Kick)' : '')}">
+          ${u.username.charAt(0).toUpperCase()}
+        </span>
+      `;
+    }).join('');
   }
 
   // Host Settings Button Visibility
@@ -2174,11 +2403,14 @@ function renderRoomState(room) {
           </svg>
           <img src="${track.thumbnail}" alt="" class="art">
           <div style="flex: 1; min-width: 0; cursor: pointer" onclick="handlePlayNow('${trackEncoded}')">
-            <div class="t">${escapeHtml(track.title)}</div>
+            <div class="t">
+              ${escapeHtml(track.title)}
+              ${isAuto ? '<span style="display: inline-block; vertical-align: middle; background: rgba(200, 255, 61, 0.15); color: var(--lime); font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; margin-left: 6px">✨ Auto-Suggest</span>' : ''}
+            </div>
             <div class="s">${escapeHtml(track.artist)} • ${track.duration}</div>
           </div>
-          <span class="av" style="background: ${isAuto ? '#3A3A46' : 'var(--sky)'}; color: ${isAuto ? '#F4F2EA' : '#0A0A0D'}" title="${isAuto ? 'Auto-suggested' : 'Queued by member'}">
-            ${isAuto ? 'B' : 'M'}
+          <span class="av" style="background: ${isAuto ? 'rgba(200, 255, 61, 0.2)' : 'var(--sky)'}; color: ${isAuto ? 'var(--lime)' : '#0A0A0D'}" title="${isAuto ? 'Auto-suggested (queued next)' : (track.addedBy ? `Queued by ${escapeHtml(track.addedBy)}` : 'Queued by member')}">
+            ${isAuto ? '✨' : (track.addedBy ? escapeHtml(track.addedBy.charAt(0).toUpperCase()) : 'M')}
           </span>
           <button type="button" class="ghost" onclick="handleRemoveQueueItem(${idx})" style="background: none; border: 0; color: var(--text-muted); cursor: pointer; padding: 4px" title="Remove">✕</button>
         </div>
@@ -2198,7 +2430,8 @@ function renderRoomState(room) {
 
     // Dynamic browser tab title
     const cleanT = room.currentTrack.cleanTitle || room.currentTrack.title;
-    document.title = `▶ ${cleanT} • ${room.currentTrack.artist} | JamLock`;
+    const playSymbol = room.playback?.isPlaying ? '▶' : '❚❚';
+    document.title = `${playSymbol} ${cleanT} • ${room.currentTrack.artist} | JamLock`;
 
     // Added by chip
     if (addedByBadge) {
@@ -2212,10 +2445,10 @@ function renderRoomState(room) {
       ambientArtBg.style.opacity = '0.52';
     }
 
-    // Sync Democratic Skip Votes Pill
+    // Sync Democratic Skip Votes Pill & Tooltip
+    const votes = room.skipVotes?.count || 0;
+    const req = room.skipVotes?.required || 1;
     if (skipVotePill) {
-      const votes = room.skipVotes?.count || 0;
-      const req = room.skipVotes?.required || 1;
       if (votes > 0) {
         skipVotePill.textContent = `${votes}/${req}`;
         skipVotePill.classList.remove('hidden');
@@ -2223,11 +2456,26 @@ function renderRoomState(room) {
         skipVotePill.classList.add('hidden');
       }
     }
+    if (skipBtn) {
+      const isHost = room.hostId === currentUserId;
+      if (isHost) {
+        skipBtn.title = 'Skip Track (Host override)';
+      } else {
+        skipBtn.title = `Vote to skip (${votes} of ${req} votes needed)`;
+      }
+    }
 
-    // Render Timestamped Reaction Markers if new track loaded
+    // Render Timestamped Reaction Markers & reset reaction counts if new track loaded
     if (room.currentTrack.id !== currentMarkersTrackId) {
       currentMarkersTrackId = room.currentTrack.id;
       renderWaveReactionMarkers(room.trackReactions || []);
+      // Reset reaction counts per track so counts don't bleed across tracks
+      Object.keys(reactionCounts).forEach((emoji) => {
+        reactionCounts[emoji] = 0;
+        const btn = document.querySelector(`.reaction-btn[data-emoji="${emoji}"]`);
+        const badge = btn?.querySelector('.rx-badge');
+        if (badge) badge.remove();
+      });
     }
 
     if (heroBanner) {
@@ -2265,6 +2513,7 @@ function renderRoomState(room) {
     if (ambientArtBg) {
       ambientArtBg.style.opacity = '0';
     }
+    document.title = 'JamLock — Music with Friends';
     updateMediaSessionMetadata(null);
     syncWakeLock(false);
     loadedTrackId = null;
@@ -2285,6 +2534,7 @@ function renderRoomState(room) {
     document.title = currentRoom?.id ? `JamLock — Room ${currentRoom.id}` : 'JamLock — Music with Friends';
     if (addedByBadge) addedByBadge.style.display = 'none';
     if (skipVotePill) skipVotePill.classList.add('hidden');
+    if (skipBtn) skipBtn.title = 'Skip Track';
     if (wavyMarkersLayer) wavyMarkersLayer.innerHTML = '';
     currentMarkersTrackId = null;
     if (ambientGlow) ambientGlow.classList.remove('vibe-warm', 'vibe-hot');
@@ -2297,8 +2547,14 @@ window.handleRemoveQueueItem = (idx) => {
 };
 
 function appendChatMessage(msg) {
-  const isMe = msg.user.username === currentUser?.username;
+  if (!msg || !chatMessages) return;
+  const msgKey = msg.id || `${msg.user?.username || ''}_${msg.timestamp || ''}_${msg.text || ''}`;
+  if (renderedChatIds.has(msgKey)) return;
+  renderedChatIds.add(msgKey);
+
+  const isMe = msg.user?.username === currentUser?.username;
   const div = document.createElement('div');
+  div.dataset.msgId = msgKey;
   div.style.display = 'flex';
   div.style.gap = '10px';
   div.style.alignItems = 'flex-start';
@@ -2307,20 +2563,26 @@ function appendChatMessage(msg) {
     div.style.alignSelf = 'flex-end';
     div.innerHTML = `
       <div style="background: var(--lime); color: #0A0A0D; border-radius: 16px 4px 16px 16px; padding: 8px 14px; font-size: 14px; font-weight: 500">
-        ${escapeHtml(msg.text)}
+        ${escapeHtml(msg.text || '')}
       </div>
     `;
   } else {
+    const uname = msg.user?.username || 'Guest';
+    const initial = uname.charAt(0).toUpperCase();
     div.innerHTML = `
-      <span class="av" style="background: ${msg.user.avatarColor}">${escapeHtml(msg.user.username.charAt(0).toUpperCase())}</span>
+      <span class="av" style="background: ${msg.user?.avatarColor || 'var(--surface-raised)'}">${escapeHtml(initial)}</span>
       <div style="background: var(--surface-raised); border-radius: 4px 16px 16px 16px; padding: 8px 14px; font-size: 14px">
-        <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 2px">${escapeHtml(msg.user.username)}</div>
-        ${escapeHtml(msg.text)}
+        <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 2px">${escapeHtml(uname)}</div>
+        ${escapeHtml(msg.text || '')}
       </div>
     `;
   }
 
   chatMessages.appendChild(div);
+  // Cap chat DOM to 50 messages to prevent unbounded DOM memory growth
+  while (chatMessages.children.length > 50) {
+    chatMessages.removeChild(chatMessages.firstChild);
+  }
   chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
@@ -2336,6 +2598,10 @@ function appendReactionChat(username, emoji) {
   div.style.padding = '4px 12px';
   div.textContent = `${username} reacted with ${name}`;
   chatMessages.appendChild(div);
+  // Cap chat DOM to 50 messages to prevent unbounded DOM memory growth
+  while (chatMessages.children.length > 50) {
+    chatMessages.removeChild(chatMessages.firstChild);
+  }
   chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
