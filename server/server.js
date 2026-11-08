@@ -4,10 +4,12 @@ import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { rooms } from './rooms.js';
-import { searchSongs, getRecommendations } from './search.js';
+import { searchSongs, getRecommendations, getMultipleRecommendations } from './search.js';
 import { resolveAudioStream, streamAudioToClient, getYoutubeAudioFormat } from './audioResolver.js';
+import { metrics } from './metrics.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,6 +59,7 @@ async function advanceTrack(roomId) {
 
   if (room.queue.length > 0) {
     rooms.skipTrack(roomId);
+    metrics.recordSongPlayed();
     // Pre-warm newly elevated track in queue
     if (room.queue.length > 0) {
       getYoutubeAudioFormat(room.queue[0].id).catch(() => {});
@@ -65,6 +68,7 @@ async function advanceTrack(roomId) {
     const recommended = await getRecommendations(room.currentTrack, room.history);
     if (recommended) {
       rooms.playTrack(roomId, recommended);
+      metrics.recordSongPlayed();
       io.to(roomId).emit('notification', {
         type: 'queue',
         text: `✨ Auto-suggested: ${recommended.title}`
@@ -186,6 +190,16 @@ app.get('/api/stream-source', async (req, res) => {
   }
 });
 
+// API: Admin Telemetry Stats (Protected with key)
+app.get('/api/admin/stats', (req, res) => {
+  const adminSecret = process.env.ADMIN_SECRET || 'jamlock-secret-admin';
+  const providedKey = req.query.key || req.headers['x-admin-key'];
+  if (!providedKey || providedKey !== adminSecret) {
+    return res.status(401).json({ error: 'Unauthorized: Invalid Admin Secret' });
+  }
+  return res.json(metrics.getSnapshot(rooms));
+});
+
 // WebSocket Connection Handlers
 const roomSfxCooldowns = new Map();
 
@@ -233,6 +247,10 @@ io.on('connection', (socket) => {
 
     socket.join(cleanId);
     const { room, user, isNewUser } = rooms.addUser(cleanId, socket.id, cleanUsername, clientId);
+
+    // Record Telemetry
+    if (clientId) metrics.recordVisitor(clientId);
+    if (isCreating) metrics.recordRoomCreated();
 
     // Notify room of user join only if it's a new human listener
     io.to(cleanId).emit('room-state', rooms.serializeRoom(room));
@@ -374,6 +392,7 @@ io.on('connection', (socket) => {
     } catch (e) {}
 
     rooms.playTrack(currentRoomId, cleanTrack);
+    metrics.recordSongPlayed();
     // Background pre-warm next track in queue (if any)
     if (room.queue.length > 0) {
       getYoutubeAudioFormat(room.queue[0].id).catch(() => {});
@@ -498,6 +517,7 @@ io.on('connection', (socket) => {
       return;
     }
     reactionTimestamps.push(now);
+    metrics.recordReaction();
 
     const room = rooms.getRoom(currentRoomId);
     const user = room?.users.get(socket.id);
@@ -531,6 +551,7 @@ io.on('connection', (socket) => {
     }
 
     roomSfxCooldowns.set(currentRoomId, now);
+    metrics.recordReaction();
     const user = room.users.get(socket.id);
     io.to(currentRoomId).emit('sfx-played', {
       sound,
@@ -555,18 +576,12 @@ io.on('connection', (socket) => {
     try {
       socket.emit('notification', { type: 'info', text: 'Finding 3 similar tracks...' });
       const current = room.currentTrack;
-      const query = `${current.artist} ${current.title} similar`;
-      const candidates = await searchSongs(query, 12);
+      const existingTracks = [
+        ...room.queue,
+        ...room.history
+      ];
 
-      const existingIds = new Set([
-        current.id,
-        ...room.queue.map((t) => t.id),
-        ...room.history.map((t) => t.id)
-      ]);
-
-      const freshTracks = (candidates || [])
-        .filter((t) => t && t.id && !existingIds.has(t.id))
-        .slice(0, 3);
+      const freshTracks = await getMultipleRecommendations(current, 3, existingTracks);
 
       if (freshTracks.length === 0) {
         socket.emit('notification', { type: 'info', text: 'No new similar tracks found' });
@@ -647,10 +662,76 @@ io.on('connection', (socket) => {
   socket.on('disconnect', handleLeave);
 });
 
-// Fallback to SPA index.html
+// Health check & Free Tier Keep-Alive Endpoint
+app.get('/api/ping', (req, res) => {
+  res.json({
+    status: 'ok',
+    uptimeSec: Math.floor(process.uptime()),
+    timestamp: Date.now()
+  });
+});
+
+// Clean Per-Room Route: /r/:roomId (Supports social preview crawlers and human visitors)
+app.get('/r/:roomId', (req, res) => {
+  const roomId = (req.params.roomId || '').trim().toUpperCase();
+  const userAgent = req.headers['user-agent'] || '';
+  const isCrawler = /bot|crawler|spider|crawling|facebookexternalhit|twitterbot|discordbot|whatsapp|telegrambot|slackbot|applebot/i.test(userAgent);
+
+  const indexPath = path.join(publicDir, 'index.html');
+
+  if (!isCrawler) {
+    return res.sendFile(indexPath);
+  }
+
+  // Generate dynamic OpenGraph tags for Discord/Twitter/WhatsApp crawlers
+  try {
+    let html = fs.readFileSync(indexPath, 'utf-8');
+    const room = rooms.getRoom(roomId);
+
+    let title = `Join Room ${roomId} on JamLock`;
+    let desc = `Listen to music together in real-time. Zero logins, zero setup.`;
+    let image = 'https://jamlock.onrender.com/browser_header.webp';
+
+    if (room && room.currentTrack) {
+      title = `▶ ${room.currentTrack.cleanTitle || room.currentTrack.title} — ${room.currentTrack.artist}`;
+      desc = `Currently playing in JamLock Room ${roomId} with ${room.users?.size || 1} listener${room.users?.size === 1 ? '' : 's'}. Join in!`;
+      if (room.currentTrack.thumbnail) {
+        image = room.currentTrack.thumbnail;
+      }
+    }
+
+    html = html.replace(/<title>.*?<\/title>/, `<title>${title} | JamLock</title>`);
+    html = html.replace(/<meta property="og:title" content=".*?">/, `<meta property="og:title" content="${title}">`);
+    html = html.replace(/<meta property="og:description" content=".*?">/, `<meta property="og:description" content="${desc}">`);
+    html = html.replace(/<meta property="og:image" content=".*?">/, `<meta property="og:image" content="${image}">`);
+    html = html.replace(/<meta name="twitter:title" content=".*?">/, `<meta name="twitter:title" content="${title}">`);
+    html = html.replace(/<meta name="twitter:description" content=".*?">/, `<meta name="twitter:description" content="${desc}">`);
+    html = html.replace(/<meta name="twitter:image" content=".*?">/, `<meta name="twitter:image" content="${image}">`);
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.send(html);
+  } catch (err) {
+    return res.sendFile(indexPath);
+  }
+});
+
+// Fallback to SPA index.html (except /admin)
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(publicDir, 'admin.html'));
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
+
+// Periodic Playback Time Accumulator (runs every 5 seconds)
+setInterval(() => {
+  for (const room of rooms.rooms.values()) {
+    if (room.playback?.isPlaying && room.currentTrack && room.users?.size > 0) {
+      metrics.recordPlaybackTime(5);
+    }
+  }
+}, 5000);
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {

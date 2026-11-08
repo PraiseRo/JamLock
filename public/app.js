@@ -460,7 +460,10 @@ quickJoinRandomizeBtn?.addEventListener('click', () => {
 
 window.addEventListener('DOMContentLoaded', () => {
   const urlParams = new URLSearchParams(window.location.search);
-  const roomParam = urlParams.get('room');
+  const pathParts = window.location.pathname.split('/').filter(Boolean);
+  const isCleanPath = pathParts[0] === 'r' && pathParts[1];
+  const roomFromPath = isCleanPath ? pathParts[1] : null;
+  const roomParam = urlParams.get('room') || roomFromPath;
   const storedRoom = localStorage.getItem('jamlock_current_room') || localStorage.getItem('beatsync_current_room');
   const targetRoom = roomParam || storedRoom;
 
@@ -600,7 +603,7 @@ function joinRoom(roomId, explicitUsername, isCreating = false) {
       updateClockOffset(response.room?.playback?.serverTime ?? response.serverTime);
 
       localStorage.setItem('jamlock_current_room', roomId);
-      window.history.pushState({}, '', `?room=${roomId}`);
+      window.history.pushState({}, '', `/r/${roomId}`);
 
       document.body.classList.add('in-room-mode');
       lobbyView?.classList.add('hidden');
@@ -656,10 +659,12 @@ window.addEventListener('beforeunload', () => {
 });
 
 copyRoomLinkBtn?.addEventListener('click', async () => {
+  const roomCode = currentRoom?.id || '';
+  const cleanUrl = `${window.location.origin}/r/${roomCode}`;
   const shareData = {
     title: 'JamLock — Listen Together',
-    text: `Join my live music room (${currentRoom?.id || 'JamLock'})!`,
-    url: window.location.href
+    text: `Join my live music room (${roomCode})!`,
+    url: cleanUrl
   };
 
   if (navigator.share && /mobile|android|iphone|ipad/i.test(navigator.userAgent)) {
@@ -672,7 +677,7 @@ copyRoomLinkBtn?.addEventListener('click', async () => {
   }
 
   try {
-    await navigator.clipboard.writeText(window.location.href);
+    await navigator.clipboard.writeText(cleanUrl);
     showToast('Invite link copied to clipboard! 📋', 'success');
   } catch (err) {
     showToast('Failed to copy link', 'error');
@@ -2183,6 +2188,10 @@ function renderRoomState(room) {
     totalDurationDisplay.textContent = room.currentTrack.duration || '0:00';
     playerStatusBadge.textContent = 'NOW PLAYING';
 
+    // Dynamic browser tab title
+    const cleanT = room.currentTrack.cleanTitle || room.currentTrack.title;
+    document.title = `▶ ${cleanT} • ${room.currentTrack.artist} | JamLock`;
+
     // Added by chip
     if (addedByBadge) {
       addedByBadge.style.display = 'flex';
@@ -2263,6 +2272,9 @@ function renderRoomState(room) {
     totalDurationDisplay.textContent = '0:00';
     currentTimeDisplay.textContent = '0:00';
     playerStatusBadge.textContent = 'ROOM READY';
+
+    // Dynamic browser tab title
+    document.title = currentRoom?.id ? `JamLock — Room ${currentRoom.id}` : 'JamLock — Music with Friends';
     if (addedByBadge) addedByBadge.style.display = 'none';
     if (skipVotePill) skipVotePill.classList.add('hidden');
     if (wavyMarkersLayer) wavyMarkersLayer.innerHTML = '';

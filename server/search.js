@@ -474,3 +474,102 @@ export async function getRecommendations(currentTrack, history = []) {
 
   return fallback || null;
 }
+
+// Get Multiple Distinct Recommendations for "+3 Similar" feature
+// Guarantees zero duplicate versions, lyric videos, or alternate uploads of the current track
+export async function getMultipleRecommendations(currentTrack, count = 3, existingTracks = []) {
+  if (!currentTrack) return [];
+
+  const bannedSongKeys = new Set();
+  const bannedCoreTitles = new Set();
+  const bannedIds = new Set();
+
+  const allPlayed = [...existingTracks, currentTrack];
+  for (const t of allPlayed) {
+    if (!t) continue;
+    if (t.id) bannedIds.add(t.id);
+    const key = getSongKey(t.title, t.artist);
+    if (key) bannedSongKeys.add(key);
+
+    const core = extractCoreTitle(t.title);
+    if (core && core.length > 2) bannedCoreTitles.add(core);
+  }
+
+  const currentCore = extractCoreTitle(currentTrack.title);
+
+  // Queries to discover genuinely diverse tracks:
+  // 1. Same artist's other hits
+  // 2. Similar artists / mix
+  // 3. Related genre songs
+  const queries = [
+    `${currentTrack.artist} top songs`,
+    `${currentTrack.artist} similar songs`,
+    `${cleanTitle(currentTrack.title, currentTrack.artist)} similar music audio`
+  ];
+
+  const candidatePool = [];
+  for (const q of queries) {
+    try {
+      const results = await searchSongs(q, 15);
+      if (results && results.length > 0) {
+        candidatePool.push(...results);
+      }
+      if (candidatePool.length >= 25) break;
+    } catch (e) {
+      console.warn('[search] Candidate query failed:', q, e.message);
+    }
+  }
+
+  if (candidatePool.length === 0) {
+    try {
+      const fallbackResults = await searchSongs(`${currentTrack.artist} songs`, 15);
+      if (fallbackResults) candidatePool.push(...fallbackResults);
+    } catch (_) {}
+  }
+
+  const selectedTracks = [];
+
+  for (const candidate of candidatePool) {
+    if (!candidate || !candidate.id) continue;
+    if (bannedIds.has(candidate.id)) continue;
+
+    const candKey = getSongKey(candidate.title, candidate.artist);
+    if (bannedSongKeys.has(candKey)) continue;
+
+    const candCore = extractCoreTitle(candidate.title);
+    if (!candCore || candCore.length < 2) continue;
+
+    // Reject if candidate is the exact same song as the currently playing track
+    let isDuplicateSong = false;
+    if (candCore === currentCore ||
+        (candCore.length > 3 && currentCore.includes(candCore)) ||
+        (currentCore.length > 3 && candCore.includes(currentCore))) {
+      isDuplicateSong = true;
+    }
+
+    if (!isDuplicateSong) {
+      for (const banned of bannedCoreTitles) {
+        if (candCore === banned ||
+            (candCore.length > 4 && banned.includes(candCore)) ||
+            (banned.length > 4 && candCore.includes(banned))) {
+          isDuplicateSong = true;
+          break;
+        }
+      }
+    }
+
+    if (isDuplicateSong) continue;
+
+    // Passed all deduplication checks!
+    selectedTracks.push(candidate);
+    bannedIds.add(candidate.id);
+    if (candKey) bannedSongKeys.add(candKey);
+    bannedCoreTitles.add(candCore);
+
+    if (selectedTracks.length >= count) {
+      break;
+    }
+  }
+
+  return selectedTracks;
+}

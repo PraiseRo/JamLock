@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JamLock - Admin Analytics & Telemetry</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0A0A0D;
+      --surface: #131318;
+      --surface-raised: #1A1A21;
+      --border-card: #26262F;
+      --border-ctrl: #2E2E38;
+      --text-main: #F4F2EA;
+      --text-secondary: #B4B2C0;
+      --text-muted: #9A98A6;
+      --lime: #C8FF3D;
+      --coral: #FF5A4E;
+      --amber: #FFB84D;
+      --sky: #7CE0FF;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text-main);
+      font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .container {
+      max-width: 1100px;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border-card);
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .logo-badge {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo-badge h1 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .live-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--lime);
+      box-shadow: 0 0 12px var(--lime);
+      display: inline-block;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(0.95); opacity: 0.8; }
+      50% { transform: scale(1.15); opacity: 1; }
+      100% { transform: scale(0.95); opacity: 0.8; }
+    }
+
+    .key-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .key-bar input {
+      height: 40px;
+      border-radius: 12px;
+      border: 1px solid var(--border-ctrl);
+      background: var(--surface);
+      color: var(--text-main);
+      padding: 0 14px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      outline: none;
+      width: 220px;
+    }
+
+    .key-bar button {
+      height: 40px;
+      padding: 0 18px;
+      border-radius: 12px;
+      border: 0;
+      background: var(--lime);
+      color: #0A0A0D;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+      transition: transform 0.15s;
+    }
+
+    .key-bar button:hover {
+      transform: scale(1.03);
+    }
+
+    /* Grid of Stat Cards */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border-card);
+      border-radius: 18px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, rgba(200,255,61,0.2), transparent);
+    }
+
+    .card-label {
+      font-size: 13px;
+      color: var(--text-muted);
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .card-value {
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: var(--text-main);
+      font-family: 'Space Grotesk', sans-serif;
+    }
+
+    .card-subtext {
+      font-size: 12px;
+      color: var(--text-secondary);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .card.highlight {
+      border-color: rgba(200, 255, 61, 0.3);
+      background: linear-gradient(180deg, rgba(200, 255, 61, 0.04), var(--surface));
+    }
+
+    .card.highlight .card-value {
+      color: var(--lime);
+    }
+
+    /* Active Rooms Table Section */
+    .section-title {
+      font-size: 17px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 8px;
+    }
+
+    .rooms-card {
+      background: var(--surface);
+      border: 1px solid var(--border-card);
+      border-radius: 18px;
+      overflow: hidden;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 13px;
+    }
+
+    th {
+      background: rgba(255, 255, 255, 0.02);
+      padding: 14px 18px;
+      color: var(--text-muted);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border-card);
+    }
+
+    td {
+      padding: 14px 18px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      color: var(--text-secondary);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    .room-code-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 700;
+      background: var(--surface-raised);
+      padding: 4px 10px;
+      border-radius: 8px;
+      color: var(--text-main);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .badge-playing {
+      color: var(--lime);
+      font-weight: 600;
+    }
+
+    .badge-idle {
+      color: var(--text-muted);
+    }
+
+    .auth-banner {
+      background: rgba(255, 90, 78, 0.1);
+      border: 1px solid var(--coral);
+      color: var(--coral);
+      padding: 14px 18px;
+      border-radius: 14px;
+      font-size: 13px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div class="logo-badge">
+        <span class="live-dot"></span>
+        <h1>JamLock Telemetry</h1>
+        <span style="font-size: 11px; font-family: 'JetBrains Mono', monospace; background: var(--surface-raised); padding: 3px 8px; border-radius: 999px; color: var(--lime)">ADMIN</span>
+      </div>
+
+      <div class="key-bar">
+        <input type="password" id="admin-key" placeholder="Enter Admin Secret..." autocomplete="off">
+        <button type="button" id="refresh-btn">Load Stats</button>
+      </div>
+    </header>
+
+    <div id="auth-banner" class="auth-banner">
+      Invalid Admin Secret key. Please enter the correct password.
+    </div>
+
+    <!-- Top Key Metrics Cards -->
+    <div class="metrics-grid">
+      <div class="card highlight">
+        <div class="card-label">👥 Lifetime Unique Users</div>
+        <div class="card-value" id="stat-users">0</div>
+        <div class="card-subtext">Unique device listeners</div>
+      </div>
+
+      <div class="card highlight">
+        <div class="card-label">⏱️ Total Hours Streamed</div>
+        <div class="card-value" id="stat-hours">0.0</div>
+        <div class="card-subtext" id="stat-minutes">0 total minutes</div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">🎵 Total Songs Played</div>
+        <div class="card-value" id="stat-songs">0</div>
+        <div class="card-subtext">Completed or queued tracks</div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">🏠 Total Rooms Created</div>
+        <div class="card-value" id="stat-rooms">0</div>
+        <div class="card-subtext">All-time listening parties</div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">⚡ Live Listeners Online</div>
+        <div class="card-value" style="color: var(--sky)" id="stat-live-users">0</div>
+        <div class="card-subtext" id="stat-live-rooms">In 0 active rooms</div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">🔥 Reactions & SFX Fired</div>
+        <div class="card-value" style="color: var(--amber)" id="stat-reactions">0</div>
+        <div class="card-subtext">Crowd energy interactions</div>
+      </div>
+    </div>
+
+    <!-- Active Rooms Table -->
+    <div class="section-title">
+      <span>🔴 Live Active Rooms</span>
+      <span id="uptime-text" style="font-size: 12px; font-weight: 500; color: var(--text-muted); font-family: 'JetBrains Mono', monospace">Uptime: 0.0h</span>
+    </div>
+
+    <div class="rooms-card">
+      <table>
+        <thead>
+          <tr>
+            <th>Room Code</th>
+            <th>Listeners</th>
+            <th>Playback Status</th>
+            <th>Now Playing</th>
+            <th>Queue</th>
+            <th>Theme</th>
+          </tr>
+        </thead>
+        <tbody id="rooms-table-body">
+          <tr>
+            <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px">
+              No live rooms active right now.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const adminKeyInput = document.getElementById('admin-key');
+    const refreshBtn = document.getElementById('refresh-btn');
+    const authBanner = document.getElementById('auth-banner');
+
+    // Auto-fill key from URL parameter or localStorage
+    const urlParams = new URLSearchParams(window.location.search);
+    const keyFromUrl = urlParams.get('key');
+    if (keyFromUrl) {
+      adminKeyInput.value = keyFromUrl;
+      localStorage.setItem('jamlock_admin_key', keyFromUrl);
+    } else {
+      const savedKey = localStorage.getItem('jamlock_admin_key');
+      if (savedKey) adminKeyInput.value = savedKey;
+    }
+
+    async function fetchStats() {
+      const key = adminKeyInput.value.trim();
+      if (!key) {
+        authBanner.style.display = 'block';
+        authBanner.textContent = 'Please enter your Admin Secret key.';
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/admin/stats?key=${encodeURIComponent(key)}`);
+        if (!res.ok) {
+          authBanner.style.display = 'block';
+          authBanner.textContent = 'Unauthorized: Invalid Admin Secret key.';
+          return;
+        }
+
+        authBanner.style.display = 'none';
+        localStorage.setItem('jamlock_admin_key', key);
+        const data = await res.json();
+        renderDashboard(data);
+      } catch (err) {
+        authBanner.style.display = 'block';
+        authBanner.textContent = 'Failed to connect to server.';
+      }
+    }
+
+    function renderDashboard(data) {
+      const { allTime, live } = data;
+
+      document.getElementById('stat-users').textContent = Number(allTime.totalUniqueVisitors || 0).toLocaleString();
+      document.getElementById('stat-hours').textContent = Number(allTime.totalPlaybackHours || 0).toLocaleString();
+      document.getElementById('stat-minutes').textContent = `${Number(allTime.totalPlaybackMinutes || 0).toLocaleString()} total stream minutes`;
+      document.getElementById('stat-songs').textContent = Number(allTime.totalSongsPlayed || 0).toLocaleString();
+      document.getElementById('stat-rooms').textContent = Number(allTime.totalRoomsCreated || 0).toLocaleString();
+      document.getElementById('stat-reactions').textContent = Number(allTime.totalReactionsFired || 0).toLocaleString();
+
+      document.getElementById('stat-live-users').textContent = live.liveListenersCount || 0;
+      document.getElementById('stat-live-rooms').textContent = `In ${live.liveRoomsCount || 0} active room${live.liveRoomsCount === 1 ? '' : 's'}`;
+      document.getElementById('uptime-text').textContent = `Server Uptime: ${live.uptimeHours || 0}h`;
+
+      // Render Active Rooms Table
+      const tbody = document.getElementById('rooms-table-body');
+      if (!live.activeRooms || live.activeRooms.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px">
+              No live rooms active right now.
+            </td>
+          </tr>
+        `;
+        return;
+      }
+
+      tbody.innerHTML = live.activeRooms.map((r) => {
+        const trackTitle = r.currentTrack ? `${r.currentTrack.title} - ${r.currentTrack.artist}` : 'None';
+        const statusBadge = r.isPlaying
+          ? '<span class="badge-playing">▶ Playing</span>'
+          : '<span class="badge-idle">⏸ Paused / Stopped</span>';
+
+        return `
+          <tr>
+            <td>
+              <span class="room-code-badge">
+                <span class="live-dot" style="width: 6px; height: 6px"></span>
+                ${r.id}
+              </span>
+            </td>
+            <td><strong>${r.listeners}</strong></td>
+            <td>${statusBadge}</td>
+            <td style="max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" title="${trackTitle}">
+              ${trackTitle}
+            </td>
+            <td>${r.queueLength} upcoming</td>
+            <td><span style="text-transform: capitalize">${r.theme}</span></td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    refreshBtn.addEventListener('click', fetchStats);
+    adminKeyInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') fetchStats();
+    });
+
+    // Auto-fetch if key exists on load
+    if (adminKeyInput.value.trim()) {
+      fetchStats();
+    }
+
+    // Auto-refresh every 5 seconds
+    setInterval(() => {
+      if (adminKeyInput.value.trim() && authBanner.style.display !== 'block') {
+        fetchStats();
+      }
+    }, 5000);
+  </script>
+</body>
+</html>

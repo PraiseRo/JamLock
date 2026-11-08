@@ -4,6 +4,27 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>JamLock — Music with Friends</title>
+  <meta name="description" content="Listen to music together in real-time. Zero logins, zero setup — sync songs with friends at the exact same second.">
+
+  <!-- Open Graph / Facebook / Discord / WhatsApp -->
+  <meta property="og:type" content="music.song">
+  <meta property="og:site_name" content="JamLock">
+  <meta property="og:url" content="https://jamlock.onrender.com">
+  <meta property="og:title" content="JamLock — Listen to Music Together in Real-Time">
+  <meta property="og:description" content="Zero logins, zero setup. Jump into a shared music room and listen with friends at the exact same second.">
+  <meta property="og:image" content="https://jamlock.onrender.com/browser_header.webp">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <!-- Twitter / X -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:url" content="https://jamlock.onrender.com">
+  <meta name="twitter:title" content="JamLock — Listen to Music Together in Real-Time">
+  <meta name="twitter:description" content="Zero logins, zero setup. Jump into a shared music room and listen with friends at the exact same second.">
+  <meta name="twitter:image" content="https://jamlock.onrender.com/browser_header.webp">
+
+  <!-- Theme Color for Mobile Browsers -->
+  <meta name="theme-color" content="#0A0A0D">
   <link rel="icon" type="image/webp" href="/browser_header.webp">
   <link rel="apple-touch-icon" href="/browser_header.webp">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -12,13 +33,15 @@
   <link rel="stylesheet" href="/style.css">
   <script src="/socket.io/socket.io.js"></script>
 
-  <!-- Pre-paint room view check to prevent lobby flicker on refresh -->
+  <!-- Pre-paint room view check: ONLY activate when URL specifically points to a room -->
   <script>
     (function() {
       try {
+        var path = window.location.pathname || '';
         var urlParams = new URLSearchParams(window.location.search);
-        var storedRoom = localStorage.getItem('jamlock_current_room') || localStorage.getItem('beatsync_current_room');
-        if (urlParams.get('room') || storedRoom) {
+        var hasRoomParam = Boolean(urlParams.get('room'));
+        var isRoomPath = path.startsWith('/r/') && path.length > 3;
+        if (hasRoomParam || isRoomPath) {
           document.documentElement.classList.add('in-room-loading');
         }
       } catch(e) {}
@@ -39,20 +62,20 @@
 <body>
 
   <!-- Dynamic Ambient Artwork Backdrop (Apple Music / Spotify Canvas Style) -->
-  <div id="ambient-backdrop" style="position: fixed; inset: 0; pointer-events: none; z-index: -2; overflow: hidden">
-    <!-- Blurred dynamic album artwork canvas -->
-    <div id="ambient-art-bg" style="position: absolute; inset: -30px; background-size: cover; background-position: center; filter: blur(64px) saturate(160%); transform: scale(1.15); opacity: 0; transition: opacity 1.2s ease, background-image 1.2s ease; will-change: opacity, transform"></div>
-    <!-- Deep contrast dark vignette overlay to preserve razor-sharp text readability -->
-    <div id="ambient-vignette" style="position: absolute; inset: 0; background: linear-gradient(180deg, rgba(10,10,13,0.72) 0%, rgba(10,10,13,0.85) 50%, #0A0A0D 100%)"></div>
+  <div id="ambient-backdrop" style="position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; background: #0A0A0D">
     <!-- Default subtle gradient mesh fallback -->
-    <div id="ambient-glow" style="position: absolute; inset: 0; background: radial-gradient(900px 520px at 20% 0%, rgba(200,255,61,0.12), transparent 60%), radial-gradient(800px 520px at 90% 100%, rgba(255,90,78,0.12), transparent 60%), #0A0A0D; transition: opacity 1.2s ease"></div>
+    <div id="ambient-glow" style="position: absolute; inset: 0; background: radial-gradient(900px 520px at 20% 0%, rgba(200,255,61,0.12), transparent 60%), radial-gradient(800px 520px at 90% 100%, rgba(255,90,78,0.12), transparent 60%); transition: opacity 1.2s ease; z-index: 1"></div>
+    <!-- Blurred dynamic album artwork canvas -->
+    <div id="ambient-art-bg" style="position: absolute; inset: -40px; background-size: cover; background-position: center; filter: blur(60px) saturate(180%); transform: scale(1.15); opacity: 0; transition: opacity 1.2s ease, background-image 1.2s ease; will-change: opacity, transform; z-index: 2"></div>
+    <!-- Deep contrast dark vignette overlay to preserve razor-sharp text readability -->
+    <div id="ambient-vignette" style="position: absolute; inset: 0; background: linear-gradient(180deg, rgba(10,10,13,0.68) 0%, rgba(10,10,13,0.80) 50%, rgba(10,10,13,0.92) 100%); z-index: 3"></div>
   </div>
 
   <!-- FLOATING REACTION PARTICLES CONTAINER -->
   <div id="reactions-container" style="position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 50"></div>
 
   <!-- VIEW 1: LOBBY / ENTRY SCREEN (Matches 3-create-or-join.html exactly) -->
-  <div id="lobby-view" style="min-height: 100vh; display: flex; flex-direction: column; justify-content: center; padding: 28px 24px 56px; box-sizing: border-box">
+  <div id="lobby-view" style="position: relative; z-index: 10; min-height: 100vh; display: flex; flex-direction: column; justify-content: center; padding: 28px 24px 56px; box-sizing: border-box">
     <div style="max-width: 1180px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 48px">
       
       <!-- Top Brand Header -->
@@ -403,8 +426,8 @@
       <section id="panel-chat" class="card dashboard-card tab-panel chat-dashboard-card">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px">
           <h2 class="h2" style="font-size: 16px; margin: 0">Room chat</h2>
-          <span style="display: flex; align-items: center; gap: 5px; font-size: 11px; color: #FF8A80; letter-spacing: 0.1em; font-weight: 700">
-            <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--coral)"></span>LIVE
+          <span style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #FF8A80; letter-spacing: 0.1em; font-weight: 700">
+            <span class="live-pulse-dot"></span>LIVE
           </span>
         </div>
 
