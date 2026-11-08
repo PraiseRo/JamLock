@@ -268,7 +268,9 @@ function updateWaveformProgress(progressPercent) {
 
 // --- 2. VOLUME CONTROLS ---
 const nativeAudio = document.getElementById('native-audio-player');
-let activeEngine = 'yt'; // 'audio' (native HTML5 <audio> for mobile background play) | 'yt' (YouTube IFrame fallback)
+// Default engine: If hosted on Render/cloud, YouTube direct iframe is 100% reliable without datacenter proxy blocks
+const isCloudHosted = window.location.hostname.includes('render.com') || window.location.hostname.includes('koyeb') || window.location.hostname.includes('railway');
+let activeEngine = isCloudHosted ? 'yt' : 'audio'; // 'audio' (native HTML5 <audio>) | 'yt' (YouTube IFrame)
 let currentVolume = parseInt(localStorage.getItem('jamlock_volume') || localStorage.getItem('beatsync_volume') || '100', 10);
 let isMuted = false;
 
@@ -840,10 +842,8 @@ window.onYouTubeIframeAPIReady = () => {
         audioLog('yt:state', event.data); // -1 unstarted, 0 ended, 1 playing, 2 paused, 3 buffering, 5 cued
         if (event.data === YT.PlayerState.PLAYING) {
           try {
-            if (!isMuted) {
-              ytPlayer.unMute();
-              ytPlayer.setVolume(currentVolume);
-            }
+            ytPlayer.unMute();
+            ytPlayer.setVolume(currentVolume);
           } catch (e) {}
           showAudioPrompt(false);
 
@@ -1056,6 +1056,12 @@ function loadCurrentTrack(room) {
 
   updateMediaSessionMetadata(track);
   syncWakeLock(Boolean(room.playback?.isPlaying));
+
+  // If on cloud (Render) or native has failed, play via YouTube immediately within user click gesture
+  if (isCloudHosted || nativeAudioFailed || !nativeAudio) {
+    fallbackToYouTubeTrack(room, isCloudHosted ? 'cloud-direct-yt' : 'native-disabled-this-session');
+    return;
+  }
 
   if (nativeAudio && trackId && !nativeAudioFailed) {
     activeEngine = 'audio';
