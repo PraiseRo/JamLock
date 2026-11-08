@@ -21,9 +21,12 @@ class RoomManager {
           updatedAt: Date.now(),
         },
         chat: [], // Last 50 messages: { id, user, text, timestamp }
+        trackReactions: [], // Pinned timeline reactions for current track: { id, emoji, positionSec, username, color }
+        skipVotes: new Set(), // Set of clientIds who voted to skip current track
         settings: {
           djMode: 'anyone', // 'anyone' | 'host-only'
-          autoSuggest: true // Automatic smart recommendation when queue ends
+          autoSuggest: true, // Automatic smart recommendation when queue ends
+          theme: 'electric' // 'electric' | 'cyber' | 'sunset' | 'midnight'
         }
       });
     }
@@ -178,6 +181,8 @@ class RoomManager {
     }
 
     room.currentTrack = track;
+    room.trackReactions = [];
+    room.skipVotes = new Set();
     room.playback = {
       isPlaying: true,
       positionSec: 0,
@@ -233,6 +238,9 @@ class RoomManager {
     const room = this.getRoom(roomId);
     if (!room) return null;
 
+    room.trackReactions = [];
+    room.skipVotes = new Set();
+
     if (room.queue.length > 0) {
       const next = room.queue.shift();
       return this.playTrack(roomId, next);
@@ -242,6 +250,27 @@ class RoomManager {
       room.playback = { isPlaying: false, positionSec: 0, updatedAt: Date.now() };
       return room;
     }
+  }
+
+  addTrackReaction(roomId, reaction) {
+    const room = this.getRoom(roomId);
+    if (!room) return null;
+    if (!room.trackReactions) room.trackReactions = [];
+    room.trackReactions.push(reaction);
+    if (room.trackReactions.length > 100) room.trackReactions.shift();
+    return reaction;
+  }
+
+  addSkipVote(roomId, clientId) {
+    const room = this.getRoom(roomId);
+    if (!room) return { votes: 0, required: 1, shouldSkip: false };
+    if (!room.skipVotes) room.skipVotes = new Set();
+    room.skipVotes.add(clientId);
+
+    const uniqueUsers = this.getUniqueUsers(room);
+    const required = Math.max(1, Math.ceil(uniqueUsers.length / 2));
+    const shouldSkip = room.skipVotes.size >= required;
+    return { votes: room.skipVotes.size, required, shouldSkip };
   }
 
   stopAtStart(roomId) {
@@ -284,7 +313,12 @@ class RoomManager {
         positionSec: this.getCurrentPosition(room),
         serverTime: Date.now()
       },
-      settings: room.settings
+      settings: room.settings,
+      trackReactions: room.trackReactions || [],
+      skipVotes: {
+        count: room.skipVotes ? room.skipVotes.size : 0,
+        required: Math.max(1, Math.ceil(this.getUniqueUsers(room).length / 2))
+      }
     };
   }
 }

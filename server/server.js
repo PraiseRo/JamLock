@@ -187,6 +187,8 @@ app.get('/api/stream-source', async (req, res) => {
 });
 
 // WebSocket Connection Handlers
+const roomSfxCooldowns = new Map();
+
 io.on('connection', (socket) => {
   let currentRoomId = null;
 
@@ -435,6 +437,37 @@ io.on('connection', (socket) => {
     await advanceTrack(currentRoomId);
   });
 
+  // Democratic Skip Voting (for guests and members)
+  socket.on('vote-skip', async () => {
+    if (!currentRoomId) return;
+    const room = rooms.getRoom(currentRoomId);
+    if (!room || !room.currentTrack) return;
+
+    const user = room.users.get(socket.id);
+    if (!user) return;
+
+    // If host votes skip, execute immediately
+    if (user.isHost) {
+      await advanceTrack(currentRoomId);
+      return;
+    }
+
+    const { votes, required, shouldSkip } = rooms.addSkipVote(currentRoomId, user.clientId);
+    if (shouldSkip) {
+      io.to(currentRoomId).emit('notification', {
+        type: 'play',
+        text: `⏭️ Vote passed (${votes}/${required}). Skipping track!`
+      });
+      await advanceTrack(currentRoomId);
+    } else {
+      io.to(currentRoomId).emit('skip-votes-updated', { votes, required });
+      io.to(currentRoomId).emit('notification', {
+        type: 'info',
+        text: `🗳️ ${user.username} voted to skip (${votes}/${required})`
+      });
+    }
+  });
+
   // Toggle Auto-Suggest Setting
   socket.on('toggle-auto-suggest', ({ enabled }) => {
     if (!currentRoomId) return;
@@ -468,12 +501,96 @@ io.on('connection', (socket) => {
 
     const room = rooms.getRoom(currentRoomId);
     const user = room?.users.get(socket.id);
-    io.to(currentRoomId).emit('reaction-received', {
+    const pos = rooms.getCurrentPosition(room);
+    const reactionData = {
       emoji: emoji || '🔥',
       username: user?.username || 'Guest',
       color: user?.avatarColor || '#ec4899',
+      positionSec: Number(pos.toFixed(1)),
       id: Math.random().toString(36).substring(2, 8)
+    };
+    rooms.addTrackReaction(currentRoomId, reactionData);
+
+    io.to(currentRoomId).emit('reaction-received', reactionData);
+  });
+
+  // DJ Hype Soundboard with Room Cooldown (3.5s anti-spam)
+  socket.on('play-sfx', ({ sound }) => {
+    if (!currentRoomId) return;
+    const room = rooms.getRoom(currentRoomId);
+    if (!room) return;
+
+    const validSounds = ['airhorn', 'scratch', 'laser'];
+    if (!validSounds.includes(sound)) return;
+
+    const now = Date.now();
+    const lastPlayed = roomSfxCooldowns.get(currentRoomId) || 0;
+    if (now - lastPlayed < 3500) {
+      socket.emit('sfx-cooldown', { remainingMs: 3500 - (now - lastPlayed) });
+      return;
+    }
+
+    roomSfxCooldowns.set(currentRoomId, now);
+    const user = room.users.get(socket.id);
+    io.to(currentRoomId).emit('sfx-played', {
+      sound,
+      username: user?.username || 'DJ'
     });
+  });
+
+  // Auto-Queue 3 Similar Tracks
+  socket.on('queue-similar-tracks', async () => {
+    if (!currentRoomId) return;
+    const room = rooms.getRoom(currentRoomId);
+    if (!room || !room.currentTrack) {
+      socket.emit('notification', { type: 'info', text: 'Play a song first to find similar tracks' });
+      return;
+    }
+
+    if (!canQueueSong(room, socket.id)) {
+      socket.emit('notification', { type: 'error', text: 'Queueing is restricted to the room host' });
+      return;
+    }
+
+    try {
+      socket.emit('notification', { type: 'info', text: 'Finding 3 similar tracks...' });
+      const current = room.currentTrack;
+      const query = `${current.artist} ${current.title} similar`;
+      const candidates = await searchSongs(query, 12);
+
+      const existingIds = new Set([
+        current.id,
+        ...room.queue.map((t) => t.id),
+        ...room.history.map((t) => t.id)
+      ]);
+
+      const freshTracks = (candidates || [])
+        .filter((t) => t && t.id && !existingIds.has(t.id))
+        .slice(0, 3);
+
+      if (freshTracks.length === 0) {
+        socket.emit('notification', { type: 'info', text: 'No new similar tracks found' });
+        return;
+      }
+
+      const user = room.users.get(socket.id);
+      const addedBy = user?.username || 'Auto-Suggest';
+
+      for (const t of freshTracks) {
+        room.queue.push({
+          ...t,
+          addedBy
+        });
+      }
+
+      io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
+      io.to(currentRoomId).emit('notification', {
+        type: 'success',
+        text: `✨ Added ${freshTracks.length} tracks similar to "${current.title}"`
+      });
+    } catch (err) {
+      console.error('[SimilarTracks] Error finding similar tracks:', err);
+    }
   });
 
   // In-room Chat Message

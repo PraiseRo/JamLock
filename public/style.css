@@ -19,6 +19,71 @@
   --sun: #FFD84D;
 }
 
+/* Room Mood Themes */
+[data-theme="cyber"] {
+  --lime: #FF2A85;
+  --coral: #FF2A85;
+  --sky: #00F0FF;
+  --amber: #FFE600;
+}
+
+[data-theme="sunset"] {
+  --lime: #FF7A18;
+  --coral: #FF385C;
+  --amber: #FFB703;
+  --sky: #FF8A80;
+}
+
+[data-theme="midnight"] {
+  --lime: #A78BFA;
+  --sky: #60A5FA;
+  --coral: #F472B6;
+  --amber: #C084FC;
+}
+
+/* DJ Soundboard & Hype Animations */
+.sfx-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--border-outline);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-main);
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.sfx-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  transform: scale(1.12);
+  border-color: var(--lime);
+}
+
+.sfx-btn:active {
+  transform: scale(0.92);
+}
+
+.sfx-btn.sfx-cooldown {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+@keyframes partyPulse {
+  0% { transform: scale(1); box-shadow: 0 0 20px var(--lime); }
+  50% { transform: scale(1.015); box-shadow: 0 0 50px var(--lime), 0 0 100px var(--sky); }
+  100% { transform: scale(1); box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+}
+
+.party-pulse {
+  animation: partyPulse 1s ease-out;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -419,6 +484,69 @@ button:focus-visible, input:focus-visible {
    every frame and causes jank on phones. */
 .wavy-progress-container.is-playing .wave-active-path {
   filter: drop-shadow(0 0 7px rgba(200, 255, 61, 0.8));
+}
+
+/* Timestamped Reaction Markers Layer on Wavy Progress Bar */
+.wavy-reaction-markers {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 1;
+}
+
+.wave-marker-pin {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%) scale(1);
+  font-size: 13px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.85));
+  transition: transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  will-change: transform;
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+}
+
+.wave-marker-pin.pulse {
+  transform: translate(-50%, -60%) scale(1.6);
+  filter: drop-shadow(0 0 10px var(--lime)) drop-shadow(0 0 16px var(--amber));
+}
+
+/* Skip Vote Badge Pill */
+#skip-vote-pill {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  background: var(--lime);
+  color: #0A0A0D;
+  font-size: 10px;
+  font-weight: 800;
+  border-radius: 999px;
+  padding: 1px 6px;
+  box-shadow: 0 0 12px rgba(200, 255, 61, 0.6);
+  line-height: 1.2;
+  pointer-events: none;
+  animation: scaleUp3D 0.2s ease forwards;
+}
+
+/* Dynamic Vibe Meter Ambient Room Glow */
+#ambient-glow.vibe-warm {
+  opacity: 0.75 !important;
+  filter: saturate(180%) brightness(1.15);
+  transition: filter 0.4s ease, opacity 0.4s ease;
+}
+
+#ambient-glow.vibe-hot {
+  opacity: 1 !important;
+  filter: saturate(260%) brightness(1.35) hue-rotate(15deg);
+  animation: vibeHeatRave 1.5s infinite alternate ease-in-out;
+}
+
+@keyframes vibeHeatRave {
+  0% { transform: scale(1); opacity: 0.85; filter: saturate(220%) brightness(1.25); }
+  100% { transform: scale(1.06); opacity: 1; filter: saturate(300%) brightness(1.4) hue-rotate(35deg); }
 }
 
 /* Hardware Accelerated 3D Floating Reaction Animation */

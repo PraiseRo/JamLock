@@ -147,6 +147,7 @@ const closeSettingsModalBtn = document.getElementById('close-settings-modal-btn'
 const saveSettingsBtn = document.getElementById('save-settings-btn');
 const settingDjMode = document.getElementById('setting-dj-mode');
 const settingQueueMode = document.getElementById('setting-queue-mode');
+const settingTheme = document.getElementById('setting-theme');
 const leaveConfirmModal = document.getElementById('leave-confirm-modal');
 const cancelLeaveBtn = document.getElementById('cancel-leave-btn');
 const confirmLeaveBtn = document.getElementById('confirm-leave-btn');
@@ -157,8 +158,77 @@ const waveBasePath = document.getElementById('wave-base-path');
 const waveActivePath = document.getElementById('wave-active-path');
 const waveClipRect = document.getElementById('wave-clip-rect');
 const wavyKnob = document.getElementById('wavy-scrubber-knob');
+const wavyMarkersLayer = document.getElementById('wavy-reaction-markers');
+const skipVotePill = document.getElementById('skip-vote-pill');
 
 let isScrubbingWave = false;
+let currentMarkersTrackId = null;
+
+// Dynamic Vibe Meter (Ambient Room Rave Glow)
+const recentReactionTimestamps = [];
+let vibeDecayTimer = null;
+
+function bumpVibeEnergy() {
+  const now = Date.now();
+  recentReactionTimestamps.push(now);
+  while (recentReactionTimestamps.length > 0 && recentReactionTimestamps[0] < now - 4500) {
+    recentReactionTimestamps.shift();
+  }
+
+  const count = recentReactionTimestamps.length;
+  if (ambientGlow) {
+    if (count >= 5) {
+      ambientGlow.classList.remove('vibe-warm');
+      ambientGlow.classList.add('vibe-hot');
+    } else if (count >= 2) {
+      ambientGlow.classList.add('vibe-warm');
+      ambientGlow.classList.remove('vibe-hot');
+    }
+  }
+
+  clearTimeout(vibeDecayTimer);
+  vibeDecayTimer = setTimeout(() => {
+    if (ambientGlow) {
+      ambientGlow.classList.remove('vibe-warm', 'vibe-hot');
+    }
+    recentReactionTimestamps.length = 0;
+  }, 4000);
+}
+
+function renderWaveReactionMarkers(reactions) {
+  if (!wavyMarkersLayer) return;
+  wavyMarkersLayer.innerHTML = '';
+  if (!reactions || !Array.isArray(reactions) || reactions.length === 0) return;
+
+  const duration = currentRoom?.currentTrack?.durationSeconds || 1;
+  reactions.forEach((rx) => {
+    addWaveReactionMarker(rx, duration, false);
+  });
+}
+
+function addWaveReactionMarker(rx, durationSec, animate = true) {
+  if (!wavyMarkersLayer) return;
+  const dur = durationSec || currentRoom?.currentTrack?.durationSeconds || 1;
+  const pct = Math.max(0, Math.min(100, (rx.positionSec / dur) * 100));
+
+  const pin = document.createElement('span');
+  pin.className = 'wave-marker-pin';
+  pin.dataset.pct = pct.toFixed(2);
+  pin.style.left = `${pct}%`;
+  pin.textContent = rx.emoji || '🔥';
+  pin.title = `${rx.username || 'Listener'} at ${formatTime(rx.positionSec)}`;
+
+  if (animate) {
+    pin.classList.add('pulse');
+    setTimeout(() => pin.classList.remove('pulse'), 700);
+  }
+
+  wavyMarkersLayer.appendChild(pin);
+  // Cap visible markers at 60 to prevent DOM clutter
+  if (wavyMarkersLayer.children.length > 60) {
+    wavyMarkersLayer.removeChild(wavyMarkersLayer.firstChild);
+  }
+}
 
 // Generate high-resolution audio sine wave path (1000px coordinate space)
 function generateWavySVGPath(totalWidth = 1000, height = 32, numWaves = 36, amplitude = 7) {
@@ -255,6 +325,20 @@ function updateWaveformProgress(progressPercent) {
   // Update Scrubber Knob position (0% to 100%)
   if (wavyKnob) {
     wavyKnob.style.left = `${boundedPct}%`;
+  }
+
+  // Micro-pulse on reaction markers as scrubber glides past them
+  if (wavyMarkersLayer) {
+    const pins = wavyMarkersLayer.querySelectorAll('.wave-marker-pin');
+    pins.forEach((pin) => {
+      const pinPct = parseFloat(pin.dataset.pct || 0);
+      if (Math.abs(pinPct - boundedPct) < 1.4) {
+        if (!pin.classList.contains('pulse')) {
+          pin.classList.add('pulse');
+          setTimeout(() => pin.classList.remove('pulse'), 600);
+        }
+      }
+    });
   }
 
   // Toggle subtle active pulse class when playing
@@ -600,6 +684,7 @@ hostSettingsBtn?.addEventListener('click', () => {
   if (currentRoom?.settings) {
     if (settingDjMode) settingDjMode.value = currentRoom.settings.djMode || 'anyone';
     if (settingQueueMode) settingQueueMode.value = currentRoom.settings.queueMode || 'anyone';
+    if (settingTheme) settingTheme.value = currentRoom.settings.theme || 'electric';
   }
   settingsModal?.classList.remove('hidden');
 });
@@ -611,7 +696,8 @@ closeSettingsModalBtn?.addEventListener('click', () => {
 saveSettingsBtn?.addEventListener('click', () => {
   socket.emit('update-room-settings', {
     djMode: settingDjMode?.value || 'anyone',
-    queueMode: settingQueueMode?.value || 'anyone'
+    queueMode: settingQueueMode?.value || 'anyone',
+    theme: settingTheme?.value || 'electric'
   });
   settingsModal?.classList.add('hidden');
 });
@@ -1472,7 +1558,12 @@ playPauseBtn?.addEventListener('click', () => {
 });
 
 skipBtn?.addEventListener('click', () => {
-  socket.emit('skip-track');
+  if (currentUser?.isHost) {
+    socket.emit('skip-track');
+  } else {
+    socket.emit('vote-skip');
+    showToast('Voted to skip track ⏭️', 'info');
+  }
 });
 
 forceResyncBtn?.addEventListener('click', () => {
@@ -1750,6 +1841,156 @@ function spawnFloatingReaction(emoji) {
   setTimeout(() => el.remove(), 2600);
 }
 
+// --- EMOJI STORM HYPER-BURST (When 4+ reactions occur within 2.2s) ---
+let stormTimestamps = [];
+function checkEmojiStorm() {
+  const now = Date.now();
+  stormTimestamps.push(now);
+  stormTimestamps = stormTimestamps.filter((t) => now - t < 2200);
+  if (stormTimestamps.length >= 4) {
+    triggerEmojiStorm();
+    stormTimestamps = [];
+  }
+}
+
+function triggerEmojiStorm() {
+  const icons = ['🔥', '⚡', '❤️', '✨', '🎉', '🚀'];
+  for (let i = 0; i < 20; i++) {
+    setTimeout(() => {
+      const el = document.createElement('span');
+      el.className = 'fl text-2xl';
+      el.textContent = icons[Math.floor(Math.random() * icons.length)];
+      el.style.left = `${Math.random() * 86 + 7}%`;
+      el.style.top = `${Math.random() * 50 + 20}%`;
+      el.style.fontSize = `${Math.random() * 16 + 22}px`;
+      el.style.animationDuration = `${1.2 + Math.random()}s`;
+      reactionsContainer?.appendChild(el);
+      setTimeout(() => el.remove(), 2200);
+    }, i * 45);
+  }
+  const playerCard = document.getElementById('panel-player');
+  if (playerCard) {
+    playerCard.classList.add('party-pulse');
+    setTimeout(() => playerCard.classList.remove('party-pulse'), 1200);
+  }
+}
+
+// --- DJ HYPE SOUNDBOARD & WEBAUDIO SYNTHESIZER ---
+let sfxAudioCtx = null;
+function getSfxAudioContext() {
+  if (!sfxAudioCtx) {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (AudioContext) sfxAudioCtx = new AudioContext();
+  }
+  if (sfxAudioCtx && sfxAudioCtx.state === 'suspended') {
+    sfxAudioCtx.resume().catch(() => {});
+  }
+  return sfxAudioCtx;
+}
+
+function playSynthesizedSfx(sound) {
+  const ctx = getSfxAudioContext();
+  if (!ctx) return;
+  const now = ctx.currentTime;
+
+  try {
+    if (sound === 'laser') {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(880, now);
+      osc.frequency.exponentialRampToValueAtTime(110, now + 0.18);
+      gain.gain.setValueAtTime(0.32, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.18);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.18);
+    } else if (sound === 'airhorn') {
+      const freqs = [698.46, 932.33, 1046.5];
+      const stabs = [0, 0.12, 0.28];
+      stabs.forEach((startTime, idx) => {
+        const stabTime = now + startTime;
+        const dur = idx === 2 ? 0.45 : 0.08;
+        freqs.forEach((f) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(f, stabTime);
+          gain.gain.setValueAtTime(0.15, stabTime);
+          gain.gain.exponentialRampToValueAtTime(0.01, stabTime + dur);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(stabTime);
+          osc.stop(stabTime + dur);
+        });
+      });
+    } else if (sound === 'scratch') {
+      const bufferSize = Math.floor(ctx.sampleRate * 0.22);
+      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = (Math.random() * 2 - 1) * Math.sin((i / bufferSize) * Math.PI);
+      }
+      const noise = ctx.createBufferSource();
+      noise.buffer = buffer;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(600, now);
+      filter.frequency.linearRampToValueAtTime(3200, now + 0.1);
+      filter.frequency.linearRampToValueAtTime(400, now + 0.22);
+      filter.Q.value = 4.0;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.35, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.22);
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+      noise.start(now);
+      noise.stop(now + 0.22);
+    }
+  } catch (err) {}
+}
+
+document.querySelectorAll('.sfx-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const sound = btn.dataset.sfx;
+    if (!sound) return;
+    getSfxAudioContext();
+    socket.emit('play-sfx', { sound });
+  });
+});
+
+socket.on('sfx-played', ({ sound, username }) => {
+  playSynthesizedSfx(sound);
+  const playerCard = document.getElementById('panel-player');
+  if (playerCard) {
+    playerCard.classList.add('party-pulse');
+    setTimeout(() => playerCard.classList.remove('party-pulse'), 800);
+  }
+});
+
+socket.on('sfx-cooldown', ({ remainingMs }) => {
+  document.querySelectorAll('.sfx-btn').forEach((btn) => {
+    btn.classList.add('sfx-cooldown');
+    setTimeout(() => btn.classList.remove('sfx-cooldown'), remainingMs || 3000);
+  });
+});
+
+// --- AUTO-FILL 3 SIMILAR TRACKS BUTTON ---
+const queueSimilarBtn = document.getElementById('queue-similar-btn');
+queueSimilarBtn?.addEventListener('click', () => {
+  queueSimilarBtn.disabled = true;
+  queueSimilarBtn.style.opacity = '0.5';
+  socket.emit('queue-similar-tracks');
+  setTimeout(() => {
+    if (queueSimilarBtn) {
+      queueSimilarBtn.disabled = false;
+      queueSimilarBtn.style.opacity = '1';
+    }
+  }, 2500);
+});
+
 // --- 10. CHAT ---
 chatForm?.addEventListener('submit', (e) => {
   e.preventDefault();
@@ -1776,6 +2017,12 @@ socket.on('playback-sync', (playbackData) => {
 
 socket.on('reaction-received', (data) => {
   spawnFloatingReaction(data.emoji);
+  checkEmojiStorm();
+  bumpVibeEnergy();
+
+  if (typeof data.positionSec === 'number') {
+    addWaveReactionMarker(data, currentRoom?.currentTrack?.durationSeconds, true);
+  }
 
   // Increment reaction badge
   if (reactionCounts[data.emoji] !== undefined) {
@@ -1790,6 +2037,17 @@ socket.on('reaction-received', (data) => {
       } else {
         badge.classList.remove('has-count');
       }
+    }
+  }
+});
+
+socket.on('skip-votes-updated', ({ votes, required }) => {
+  if (skipVotePill) {
+    if (votes > 0) {
+      skipVotePill.textContent = `${votes}/${required}`;
+      skipVotePill.classList.remove('hidden');
+    } else {
+      skipVotePill.classList.add('hidden');
     }
   }
 });
@@ -1873,6 +2131,11 @@ function renderRoomState(room) {
     syncAutoSuggestUI(room.settings.autoSuggest);
   }
 
+  // Apply Room Mood Theme
+  const roomTheme = room.settings?.theme || 'electric';
+  document.documentElement.dataset.theme = roomTheme;
+  if (settingTheme) settingTheme.value = roomTheme;
+
   // Queue List Rendering
   queueCountBadge.textContent = room.queue.length;
   const mobileQueueCount = document.getElementById('mobile-queue-count');
@@ -1932,6 +2195,24 @@ function renderRoomState(room) {
       ambientArtBg.style.opacity = '0.52';
     }
 
+    // Sync Democratic Skip Votes Pill
+    if (skipVotePill) {
+      const votes = room.skipVotes?.count || 0;
+      const req = room.skipVotes?.required || 1;
+      if (votes > 0) {
+        skipVotePill.textContent = `${votes}/${req}`;
+        skipVotePill.classList.remove('hidden');
+      } else {
+        skipVotePill.classList.add('hidden');
+      }
+    }
+
+    // Render Timestamped Reaction Markers if new track loaded
+    if (room.currentTrack.id !== currentMarkersTrackId) {
+      currentMarkersTrackId = room.currentTrack.id;
+      renderWaveReactionMarkers(room.trackReactions || []);
+    }
+
     if (heroBanner) {
       heroBanner.style.background = `
         linear-gradient(180deg, rgba(0,0,0,0.0), #0A0A0D 98%),
@@ -1983,6 +2264,10 @@ function renderRoomState(room) {
     currentTimeDisplay.textContent = '0:00';
     playerStatusBadge.textContent = 'ROOM READY';
     if (addedByBadge) addedByBadge.style.display = 'none';
+    if (skipVotePill) skipVotePill.classList.add('hidden');
+    if (wavyMarkersLayer) wavyMarkersLayer.innerHTML = '';
+    currentMarkersTrackId = null;
+    if (ambientGlow) ambientGlow.classList.remove('vibe-warm', 'vibe-hot');
     updateWaveformProgress(0);
   }
 }
