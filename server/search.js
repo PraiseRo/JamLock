@@ -303,31 +303,34 @@ async function searchFallback(query, limit = 12) {
 
 // Staggered concurrent search race: resolves immediately as soon as either source returns
 async function fetchFastResults(cleanQuery, limit = 16) {
+  const startT = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
     let pending = 2;
 
-    const handleResults = (items) => {
+    const handleResults = (sourceName, items) => {
       if (resolved) return;
       if (Array.isArray(items) && items.length > 0) {
         resolved = true;
+        console.log(`[SEARCH-SOURCE] "${cleanQuery}" won by ${sourceName} in ${Date.now() - startT}ms (${items.length} items)`);
         resolve(items);
       } else {
         pending--;
         if (pending <= 0 && !resolved) {
           resolved = true;
+          console.warn(`[SEARCH-SOURCE] "${cleanQuery}" all sources failed/empty in ${Date.now() - startT}ms`);
           resolve([]);
         }
       }
     };
 
     // Branch 1: Direct YouTubei JSON (target: 300ms - 900ms)
-    searchYouTubei(cleanQuery, limit).then(handleResults).catch(() => handleResults(null));
+    searchYouTubei(cleanQuery, limit).then((res) => handleResults('YouTubei', res)).catch(() => handleResults('YouTubei', null));
 
     // Branch 2: Staggered fallback (starts after 500ms if YouTubei hasn't returned yet)
     setTimeout(() => {
       if (resolved) return;
-      searchFallback(cleanQuery, limit).then(handleResults).catch(() => handleResults(null));
+      searchFallback(cleanQuery, limit).then((res) => handleResults('Fallback', res)).catch(() => handleResults('Fallback', null));
     }, 500);
   });
 }

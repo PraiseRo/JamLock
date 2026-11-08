@@ -284,6 +284,7 @@ app.get('/api/search', async (req, res) => {
   const cached = SERVER_SEARCH_CACHE.get(normalizedKey);
   if (cached && Date.now() < cached.expiresAt) {
     res.setHeader('X-Cache', 'HIT');
+    console.log(`[SEARCH] Query: "${rawQuery}" | Cache: HIT | Results: ${cached.results?.length || 0}`);
     return res.json(cached.results);
   }
 
@@ -292,6 +293,7 @@ app.get('/api/search', async (req, res) => {
   const results = await searchSongs(rawQuery);
   const duration = Date.now() - startTime;
   res.setHeader('X-Response-Time-Ms', duration);
+  console.log(`[SEARCH] Query: "${rawQuery}" | Cache: MISS | Time: ${duration}ms | Results: ${results?.length || 0}`);
 
   if (Array.isArray(results)) {
     SERVER_SEARCH_CACHE.set(normalizedKey, {
@@ -628,12 +630,16 @@ io.on('connection', (socket) => {
 
     // Fast resolution check: if stream format is not yet cached, resolve format concurrently
     // with a short 1.2s bounded race so the room playback clock starts precisely when the stream is ready
+    const t0 = Date.now();
+    let formatResolved = false;
     try {
       await Promise.race([
-        getYoutubeAudioFormat(cleanTrack.id),
+        getYoutubeAudioFormat(cleanTrack.id).then(() => { formatResolved = true; }),
         new Promise((resolve) => setTimeout(resolve, 1200))
       ]);
     } catch (e) {}
+    const raceMs = Date.now() - t0;
+    console.log(`[PLAY-NOW] Room ${currentRoomId}: Track "${cleanTrack.title}" (${cleanTrack.id}) format resolved: ${formatResolved} in ${raceMs}ms`);
 
     rooms.playTrack(currentRoomId, cleanTrack);
     metrics.recordSongPlayed();

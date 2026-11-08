@@ -1487,6 +1487,13 @@ button:focus-visible, input:focus-visible {
   opacity: 1;
 }
 
+#join-code-input::placeholder {
+  color: rgba(255, 255, 255, 0.36);
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
 /* Accessibility: Full prefers-reduced-motion compliance */
 @media (prefers-reduced-motion: reduce) {
   *, ::before, ::after {

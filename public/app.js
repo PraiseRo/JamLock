@@ -1923,6 +1923,8 @@ function applyRoomPlayback(playback) {
     playerStatusBadge.textContent = 'PAUSED';
   }
 
+  console.log(`[UI-ICON-SYNC] isPlaying=${playback.isPlaying} | playIconHidden=${playIcon?.classList.contains('hidden')} | pauseIconHidden=${pauseIcon?.classList.contains('hidden')} | engine=${activeEngine} | nativePaused=${nativeAudio?.paused}`);
+
   if ('mediaSession' in navigator) {
     try {
       navigator.mediaSession.playbackState = playback.isPlaying ? 'playing' : 'paused';
@@ -2129,11 +2131,16 @@ inlineSearchInput?.addEventListener('input', (e) => {
     renderSearchSkeletons();
     searchSpinner?.classList.remove('hidden');
 
+    const searchStart = performance.now();
     try {
       const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, {
         signal: searchAbortController.signal
       });
       const results = await res.json();
+      const roundtripMs = (performance.now() - searchStart).toFixed(0);
+      const serverCache = res.headers.get('X-Cache') || 'UNKNOWN';
+      const serverDuration = res.headers.get('X-Response-Time-Ms') || '?';
+      console.log(`[CLIENT-SEARCH] "${q}" took ${roundtripMs}ms roundtrip (Server: ${serverDuration}ms, Cache: ${serverCache}, Count: ${results?.length || 0})`);
       CLIENT_SEARCH_CACHE.set(q.toLowerCase(), results);
       renderSearchResults(results);
     } catch (err) {
@@ -2179,10 +2186,14 @@ function getDisplayTitle(song) {
   return t;
 }
 
+let currentSearchResults = [];
+
 function renderSearchResults(items) {
   if (!searchResultsList) return;
   trendingSection?.classList.add('hidden');
   searchResultsSection?.classList.remove('hidden');
+
+  currentSearchResults = items || [];
 
   if (!items || items.length === 0) {
     searchResultsList.innerHTML = `
@@ -2193,27 +2204,26 @@ function renderSearchResults(items) {
     return;
   }
 
-  searchResultsList.innerHTML = items.map((song) => {
-    const songEncoded = encodeURIComponent(JSON.stringify(song));
+  searchResultsList.innerHTML = items.map((song, idx) => {
     const displayTitle = getDisplayTitle(song);
     return `
       <div class="row" onmouseenter="handleWarmup('${song.id}')">
-        <button type="button" onclick="handlePlayNow('${songEncoded}')" class="art-btn" style="background-image: url('${song.thumbnail}')" title="Play Now">
+        <button type="button" class="art-btn" data-search-idx="${idx}" data-search-action="play-now" style="background-image: url('${song.thumbnail}')" title="Play Now">
           <div class="play-hint">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="var(--lime)"><path d="M8 5v14l11-7z"/></svg>
           </div>
         </button>
-        <div style="flex: 1; min-width: 0; cursor: pointer" onclick="handlePlayNow('${songEncoded}')">
+        <div style="flex: 1; min-width: 0; cursor: pointer" data-search-idx="${idx}" data-search-action="play-now">
           <div class="t" title="${escapeHtml(displayTitle)}">${escapeHtml(displayTitle)}</div>
           <div class="s">${escapeHtml(song.artist)}</div>
         </div>
         <span class="mono" style="margin-right: 4px">${song.duration}</span>
         <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0">
-          <button type="button" class="search-action-btn" onclick="handleQueueSong('${songEncoded}', false)" title="Add to Queue">
+          <button type="button" class="search-action-btn" data-search-idx="${idx}" data-search-action="queue" title="Add to Queue">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
             <span class="search-btn-label">Queue</span>
           </button>
-          <button type="button" class="search-action-btn icon-only" title="Play Next" onclick="handleQueueSong('${songEncoded}', true)">
+          <button type="button" class="search-action-btn icon-only" title="Play Next" data-search-idx="${idx}" data-search-action="play-next">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
           </button>
         </div>
@@ -2221,6 +2231,24 @@ function renderSearchResults(items) {
     `;
   }).join('');
 }
+
+// Clean event delegation for search result actions (handles apostrophes & special characters flawlessly)
+searchResultsList?.addEventListener('click', (e) => {
+  const trigger = e.target.closest('[data-search-action]');
+  if (!trigger) return;
+  const idx = parseInt(trigger.getAttribute('data-search-idx'), 10);
+  const song = currentSearchResults[idx];
+  if (!song) return;
+
+  const action = trigger.getAttribute('data-search-action');
+  if (action === 'play-now') {
+    handlePlayNow(song);
+  } else if (action === 'queue') {
+    handleQueueSong(song, false);
+  } else if (action === 'play-next') {
+    handleQueueSong(song, true);
+  }
+});
 
 // Track Stream Pre-Warm Cache
 const warmedUpTracks = new Set();
@@ -2244,23 +2272,43 @@ document.querySelectorAll('.sample-chip, .quick-search-btn').forEach((btn) => {
   });
 });
 
-window.handlePlayNow = (songEncodedStr) => {
+window.handlePlayNow = (songOrEncoded) => {
   try {
     if (document.activeElement && typeof document.activeElement.blur === 'function') {
       document.activeElement.blur();
     }
-    const song = JSON.parse(decodeURIComponent(songEncodedStr));
+    let song = songOrEncoded;
+    if (typeof songOrEncoded === 'string') {
+      try {
+        song = JSON.parse(decodeURIComponent(songOrEncoded));
+      } catch (err) {
+        console.warn('[handlePlayNow] parse string failed:', err);
+        return;
+      }
+    }
+    if (!song) return;
+
+    const t0 = performance.now();
+    console.log(`[PLAY-NOW-CLICK] User clicked Play Now for: "${song.title}" (${song.id}) at t=0ms`);
+
+    // Optimistic UI update: switch hero button to pause icon immediately upon click
+    playIcon?.classList.add('hidden');
+    pauseIcon?.classList.remove('hidden');
+    if (playerStatusBadge) playerStatusBadge.textContent = 'LOADING...';
 
     // Optimistic audio pipeline preload within user click gesture for instant playback
     if (nativeAudio && song?.id && (!isCloudHosted || isMobileClient) && !nativeAudioFailed) {
       const audioUrl = `/api/audio/${encodeURIComponent(song.id)}`;
       if (!nativeAudio.src.endsWith(audioUrl)) {
+        console.log(`[AUDIO-PRELOAD] Setting nativeAudio.src to ${audioUrl}`);
         nativeAudio.src = audioUrl;
         nativeAudio.currentTime = 0;
         nativeAudio.load();
         const playPromise = nativeAudio.play();
         if (playPromise && typeof playPromise.catch === 'function') {
-          playPromise.catch(() => {});
+          playPromise
+            .then(() => console.log(`[AUDIO-PRELOAD] nativeAudio.play() promise resolved at +${(performance.now() - t0).toFixed(0)}ms`))
+            .catch((err) => console.warn(`[AUDIO-PRELOAD] nativeAudio.play() rejected:`, err));
         }
       }
     }
@@ -2271,14 +2319,24 @@ window.handlePlayNow = (songEncodedStr) => {
   }
 };
 
-window.handleQueueSong = (songEncodedStr, playNext) => {
+window.handleQueueSong = (songOrEncoded, playNext) => {
   try {
     if (document.activeElement && typeof document.activeElement.blur === 'function') {
       document.activeElement.blur();
     }
-    const song = JSON.parse(decodeURIComponent(songEncodedStr));
+    let song = songOrEncoded;
+    if (typeof songOrEncoded === 'string') {
+      try {
+        song = JSON.parse(decodeURIComponent(songOrEncoded));
+      } catch (err) {
+        console.warn('[handleQueueSong] parse string failed:', err);
+        return;
+      }
+    }
+    if (!song) return;
+
     socket.emit('add-to-queue', { track: song, playNext });
-    showToast(`Added "${song.title.slice(0, 28)}..." to queue`, 'success');
+    showToast(`Added "${(song.title || '').slice(0, 28)}..." to queue`, 'success');
   } catch (e) {
     console.error(e);
   }
@@ -2660,7 +2718,6 @@ function renderRoomState(room) {
     `;
   } else {
     queueList.innerHTML = room.queue.map((track, idx) => {
-      const trackEncoded = encodeURIComponent(JSON.stringify(track));
       const isAuto = track.isAutoSuggested;
       return `
         <div class="row">
@@ -2670,7 +2727,7 @@ function renderRoomState(room) {
             <circle cx="9" cy="18" r="1"/><circle cx="15" cy="18" r="1"/>
           </svg>
           <img src="${track.thumbnail}" alt="" class="art">
-          <div style="flex: 1; min-width: 0; cursor: pointer" onclick="handlePlayNow('${trackEncoded}')">
+          <div style="flex: 1; min-width: 0; cursor: pointer" data-queue-idx="${idx}" data-queue-action="play-now">
             <div class="t">
               ${escapeHtml(track.title)}
               ${isAuto ? '<span style="display: inline-block; vertical-align: middle; background: rgba(200, 255, 61, 0.15); color: var(--lime); font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; margin-left: 6px">✨ Auto-Suggest</span>' : ''}
@@ -2680,7 +2737,7 @@ function renderRoomState(room) {
           <span class="av" style="background: ${isAuto ? 'rgba(200, 255, 61, 0.2)' : 'var(--sky)'}; color: ${isAuto ? 'var(--lime)' : '#0A0A0D'}" title="${isAuto ? 'Auto-suggested (queued next)' : (track.addedBy ? `Queued by ${escapeHtml(track.addedBy)}` : 'Queued by member')}">
             ${isAuto ? '✨' : (track.addedBy ? escapeHtml(track.addedBy.charAt(0).toUpperCase()) : 'M')}
           </span>
-          <button type="button" class="ghost" onclick="handleRemoveQueueItem(${idx})" style="background: none; border: 0; color: var(--text-muted); cursor: pointer; padding: 4px" title="Remove">✕</button>
+          <button type="button" class="ghost" data-queue-idx="${idx}" data-queue-action="remove" style="background: none; border: 0; color: var(--text-muted); cursor: pointer; padding: 4px" title="Remove">✕</button>
         </div>
       `;
     }).join('');
@@ -2813,6 +2870,20 @@ function renderRoomState(room) {
 window.handleRemoveQueueItem = (idx) => {
   socket.emit('remove-from-queue', { index: idx });
 };
+
+// Clean event delegation for queue list actions (handles quotes & special characters flawlessly)
+queueList?.addEventListener('click', (e) => {
+  const trigger = e.target.closest('[data-queue-action]');
+  if (!trigger) return;
+  const idx = parseInt(trigger.getAttribute('data-queue-idx'), 10);
+  const action = trigger.getAttribute('data-queue-action');
+  if (action === 'play-now') {
+    const track = currentRoom?.queue?.[idx];
+    if (track) handlePlayNow(track);
+  } else if (action === 'remove') {
+    handleRemoveQueueItem(idx);
+  }
+});
 
 function appendChatMessage(msg) {
   if (!msg || !chatMessages) return;
