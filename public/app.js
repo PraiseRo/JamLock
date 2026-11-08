@@ -834,8 +834,9 @@ window.addEventListener('beforeunload', () => {
 });
 
 // Mobile Safari/Chrome support: pagehide fires reliably on mobile navigation or tab close
-window.addEventListener('pagehide', () => {
-  if (currentRoom) {
+// Note: only emit leave-room if the page is being permanently discarded, not frozen in bfcache / app-switching
+window.addEventListener('pagehide', (e) => {
+  if (currentRoom && !e.persisted) {
     try {
       socket.emit('leave-room');
     } catch (e) {}
@@ -1116,9 +1117,14 @@ if (nativeAudio) {
   });
 
   nativeAudio.addEventListener('ended', () => {
-    if (activeEngine !== 'audio') return;
-    if (currentUser?.isHost && currentRoom?.currentTrack) {
-      socket.emit('skip-track', { endedTrackId: currentRoom.currentTrack.id });
+    if (activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
+    if (!currentRoom._trackEndNotified) {
+      currentRoom._trackEndNotified = true;
+      if (currentUser?.isHost) {
+        socket.emit('skip-track', { endedTrackId: currentRoom.currentTrack.id });
+      } else {
+        socket.emit('sync-request');
+      }
     }
   });
 
@@ -1256,8 +1262,13 @@ window.onYouTubeIframeAPIReady = () => {
           }
         } else if (event.data === YT.PlayerState.ENDED) {
           // Server timer is authoritative; this is a fallback for tracks with unknown duration
-          if (currentUser?.isHost && currentRoom?.currentTrack) {
-            socket.emit('skip-track', { endedTrackId: currentRoom.currentTrack.id });
+          if (currentRoom?.currentTrack && !currentRoom._trackEndNotified) {
+            currentRoom._trackEndNotified = true;
+            if (currentUser?.isHost) {
+              socket.emit('skip-track', { endedTrackId: currentRoom.currentTrack.id });
+            } else {
+              socket.emit('sync-request');
+            }
           }
         }
       }
@@ -1275,6 +1286,26 @@ function startSyncEngine() {
     // Server timeline drives the UI, independent of the media engine
     let effectiveTime = calculateServerPosition();
     const roomPlaying = currentRoom.playback.isPlaying;
+
+    // Track-End Boundary Protection: never kick audio.play() or driftSeek() past track finish
+    const isAtOrPastEnd = effectiveTime >= duration - 0.4 || (activeEngine === 'audio' && nativeAudio?.ended);
+    if (isAtOrPastEnd) {
+      if (activeEngine === 'audio' && nativeAudio && !nativeAudio.paused) {
+        try { nativeAudio.pause(); } catch (e) {}
+      }
+      currentTimeDisplay.textContent = formatTime(duration);
+      updateWaveformProgress(100);
+
+      if (!currentRoom._trackEndNotified) {
+        currentRoom._trackEndNotified = true;
+        if (currentUser?.isHost) {
+          socket.emit('skip-track', { endedTrackId: currentRoom.currentTrack.id });
+        } else {
+          socket.emit('sync-request');
+        }
+      }
+      return;
+    }
 
     if (activeEngine === 'audio' && nativeAudio && nativeAudio.src) {
       const local = nativeAudio.currentTime || 0;
@@ -1375,6 +1406,23 @@ function startSyncEngine() {
         if (currentRoom?.currentTrack && currentRoom.playback?.isPlaying) {
           syncWakeLock(true);
           const serverPos = calculateServerPosition();
+          const duration = currentRoom.currentTrack.durationSeconds || 0;
+
+          if (duration > 0 && serverPos >= duration - 0.4) {
+            // Track reached its end while app was in background!
+            if (activeEngine === 'audio' && nativeAudio && !nativeAudio.paused) {
+              try { nativeAudio.pause(); } catch (e) {}
+            }
+            if (!currentRoom._trackEndNotified) {
+              currentRoom._trackEndNotified = true;
+              if (currentUser?.isHost) {
+                socket.emit('skip-track', { endedTrackId: currentRoom.currentTrack.id });
+              } else {
+                socket.emit('sync-request');
+              }
+            }
+            return;
+          }
 
           if (activeEngine === 'audio' && nativeAudio) {
             const drift = Math.abs((nativeAudio.currentTime || 0) - serverPos);
@@ -1382,7 +1430,7 @@ function startSyncEngine() {
             if (drift > DRIFT_HARD_SEEK_SEC) {
               driftSeek(serverPos);
             }
-            if (nativeAudio.paused) {
+            if (nativeAudio.paused && !nativeAudio.ended) {
               nativeAudio.play().catch(() => {});
             }
           } else if (activeEngine === 'yt' && ytReady && ytPlayer) {
@@ -1395,7 +1443,7 @@ function startSyncEngine() {
               if (drift > DRIFT_HARD_SEEK_SEC) {
                 driftSeek(serverPos);
               }
-              if (state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING) {
+              if (state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING && state !== YT.PlayerState.ENDED) {
                 ytPlayer.playVideo();
               }
             } catch (e) {}
@@ -1465,6 +1513,7 @@ function loadCurrentTrack(room) {
   const trackId = track.id;
   if (loadedTrackId === trackId) return;
   loadedTrackId = trackId;
+  if (room) room._trackEndNotified = false;
   settlePending = true;
   lastSeekAt = Date.now(); // no drift seeks while the new track is loading
   ++loadRequestToken;

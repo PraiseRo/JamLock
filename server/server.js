@@ -177,9 +177,8 @@ function scheduleAutoAdvance(roomId) {
 
   room.autoAdvanceTimer = setTimeout(() => {
     room.autoAdvanceTimer = null;
-    // Only advance if the same track is still playing and someone is listening
+    // Only advance if the same track is still playing
     if (room.currentTrack?.id !== trackId || !room.playback.isPlaying) return;
-    if (room.users.size === 0) return;
     advanceTrack(roomId).catch(() => {});
   }, remainingSec * 1000 + 800);
 }
@@ -484,6 +483,16 @@ io.on('connection', (socket) => {
     currentRoomId = cleanId;
     socket.join(cleanId);
     const { room, user, isNewUser } = joinRes;
+
+    // If returning to a track that finished playing while away, advance to next song
+    if (
+      room.currentTrack &&
+      room.playback.isPlaying &&
+      room.currentTrack.durationSeconds > 0 &&
+      rooms.getCurrentPosition(room) >= room.currentTrack.durationSeconds - 0.5
+    ) {
+      advanceTrack(cleanId).catch(() => {});
+    }
 
     // Record Telemetry
     if (clientId) metrics.recordVisitor(clientId);
@@ -947,10 +956,22 @@ io.on('connection', (socket) => {
   });
 
   // Request sync timestamp
-  socket.on('sync-request', (callback) => {
+  socket.on('sync-request', async (callback) => {
     if (!currentRoomId) return;
     const room = rooms.getRoom(currentRoomId);
-    if (room && callback) {
+    if (!room) return;
+
+    // Check if current track has exceeded its duration
+    if (
+      room.currentTrack &&
+      room.playback.isPlaying &&
+      room.currentTrack.durationSeconds > 0 &&
+      rooms.getCurrentPosition(room) >= room.currentTrack.durationSeconds - 0.5
+    ) {
+      await advanceTrack(currentRoomId).catch(() => {});
+    }
+
+    if (callback) {
       callback({
         isPlaying: room.playback.isPlaying,
         positionSec: rooms.getCurrentPosition(room),
