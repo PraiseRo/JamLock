@@ -160,24 +160,89 @@ button:focus-visible, input:focus-visible {
 .row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px;
-  border-radius: 16px;
-  transition: background 0.12s;
+  gap: 14px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  transition: all 0.15s ease;
   contain: layout style;
+  border: 1px solid transparent;
 }
 
 .row:hover {
-  background: var(--surface-raised);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.06);
 }
 
 .art {
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
+  width: 46px;
+  height: 46px;
+  border-radius: 10px;
   flex: none;
   object-fit: cover;
   background: var(--surface-raised);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.art-btn {
+  width: 46px;
+  height: 46px;
+  border-radius: 10px;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  flex: none;
+  background-size: cover;
+  background-position: center;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.art-btn .play-hint {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.row:hover .art-btn .play-hint,
+.art-btn:hover .play-hint {
+  opacity: 1;
+}
+
+/* Micro-action buttons on search rows */
+.search-action-btn {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-outline);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-main);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.search-action-btn:hover {
+  background: rgba(200, 255, 61, 0.12);
+  border-color: var(--lime);
+  color: var(--lime);
+  transform: scale(1.03);
+}
+
+.search-action-btn.icon-only {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
 }
 
 .t {
@@ -561,6 +626,34 @@ button:focus-visible, input:focus-visible {
 
   #lobby-view h1 {
     font-size: 38px !important;
+  }
+
+  /* Mobile Search Row & Action Buttons */
+  .search-action-btn {
+    width: 36px !important;
+    height: 36px !important;
+    padding: 0 !important;
+    justify-content: center !important;
+  }
+
+  .search-btn-label {
+    display: none !important;
+  }
+
+  .search-action-btn.icon-only {
+    width: 36px !important;
+    height: 36px !important;
+  }
+
+  .search-dashboard-card .row {
+    padding: 8px 6px !important;
+    gap: 10px !important;
+  }
+
+  .search-dashboard-card .art-btn,
+  .search-dashboard-card .art {
+    width: 42px !important;
+    height: 42px !important;
   }
 }
 

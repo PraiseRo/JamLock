@@ -89,24 +89,39 @@ class RoomManager {
 
         if (user.sockets) {
           user.sockets.delete(socketId);
+          // Prune any socket handles no longer active in room.users
+          for (const s of user.sockets) {
+            if (!room.users.has(s)) {
+              user.sockets.delete(s);
+            }
+          }
         }
 
-        // If other tabs are still open in the same browser, do not kick user out of room
+        // If other tabs are still active in the same browser, do not kick user out of room
         if (user.sockets && user.sockets.size > 0) {
           return { room, user, isFullyDisconnected: false };
         }
 
-        // Clean up any remaining references
+        // Clean up any remaining references for this client
         for (const [sId, u] of room.users.entries()) {
           if (u.clientId === user.clientId) {
             room.users.delete(sId);
           }
         }
 
-        // If host left, elect the next user as host
-        const uniqueUsers = this.getUniqueUsers(room);
-        if (user.isHost && uniqueUsers.length > 0) {
-          uniqueUsers[0].isHost = true;
+        let newHost = null;
+        // If host left, elect the earliest-joined remaining user as host
+        if (user.isHost && room.users.size > 0) {
+          let candidate = null;
+          for (const u of room.users.values()) {
+            if (!candidate || (u.joinedAt && u.joinedAt < candidate.joinedAt)) {
+              candidate = u;
+            }
+          }
+          if (candidate) {
+            candidate.isHost = true;
+            newHost = candidate;
+          }
         }
 
         // Clean up empty rooms after 10 minutes
@@ -118,7 +133,7 @@ class RoomManager {
           }, 1000 * 60 * 10);
         }
 
-        return { room, user, isFullyDisconnected: true };
+        return { room, user, isFullyDisconnected: true, newHost };
       }
     }
     return null;

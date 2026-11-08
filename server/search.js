@@ -5,6 +5,7 @@ import ytSearch from 'yt-search';
 const CACHE = new Map();
 const CACHE_MAX_SIZE = 500;
 const CACHE_TTL_MS = 1000 * 60 * 60; // 1 hour cache
+const INFLIGHT_SEARCHES = new Map();
 
 // Regex patterns to clean bracketed video metadata
 const VIDEO_NOISE_REGEX = /\s*(\(|\[)(official\s*(music\s*)?video|official\s*audio|official\s*lyric(\s*video)?|audio|lyrics?|visualizer|hd|4k|hq|music\s*video|prod\.?\s*by[^\)\]]*|extended|remastered|out\s*now)(\)|\])/gi;
@@ -12,13 +13,28 @@ const VIDEO_NOISE_REGEX = /\s*(\(|\[)(official\s*(music\s*)?video|official\s*aud
 // Strip features from titles (e.g. feat., ft., featuring, with)
 const FEAT_REGEX = /\s*(feat\.?|ft\.?|featuring|with)\b[^\-\(\[\:\,]*/gi;
 
-// Clean raw YouTube title for display
-function cleanTitle(rawTitle) {
+// Clean raw YouTube title for display and strip leading "Artist - " redundancy
+function cleanTitle(rawTitle, artist = '') {
   if (!rawTitle) return 'Untitled Track';
-  return rawTitle
+  let t = rawTitle
     .replace(VIDEO_NOISE_REGEX, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
+
+  // Strip leading "Artist - " if present
+  if (t.includes(' - ')) {
+    const parts = t.split(' - ');
+    const possibleArtist = parts[0].trim().toLowerCase();
+    const cleanA = (artist || '').toLowerCase().trim();
+    if (cleanA && (cleanA.includes(possibleArtist) || possibleArtist.includes(cleanA))) {
+      t = parts.slice(1).join(' - ').trim();
+    } else if (parts.length === 2 && possibleArtist.length > 0) {
+      // General "Artist - Title" format: use clean title part
+      t = parts[1].trim();
+    }
+  }
+
+  return t || rawTitle;
 }
 
 // Canonical key to group duplicate uploads of the same song across different channels
@@ -170,7 +186,7 @@ function deduplicateAudioTracks(tracks, query = '', limit = 8) {
 
     const candidate = {
       ...track,
-      cleanTitle: cleanTitle(track.title),
+      cleanTitle: cleanTitle(track.title, track.artist),
       relevanceScore
     };
 
@@ -205,7 +221,7 @@ async function searchYouTubei(query, limit = 12) {
   };
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 3500);
+  const timeoutId = setTimeout(() => controller.abort(), 1500);
 
   try {
     const res = await fetch(url, {
@@ -284,6 +300,37 @@ async function searchFallback(query, limit = 12) {
   }
 }
 
+// Staggered concurrent search race: resolves immediately as soon as either source returns
+async function fetchFastResults(cleanQuery, limit = 16) {
+  return new Promise((resolve) => {
+    let resolved = false;
+    let pending = 2;
+
+    const handleResults = (items) => {
+      if (resolved) return;
+      if (Array.isArray(items) && items.length > 0) {
+        resolved = true;
+        resolve(items);
+      } else {
+        pending--;
+        if (pending <= 0 && !resolved) {
+          resolved = true;
+          resolve([]);
+        }
+      }
+    };
+
+    // Branch 1: Direct YouTubei JSON (target: 300ms - 900ms)
+    searchYouTubei(cleanQuery, limit).then(handleResults).catch(() => handleResults(null));
+
+    // Branch 2: Staggered fallback (starts after 500ms if YouTubei hasn't returned yet)
+    setTimeout(() => {
+      if (resolved) return;
+      searchFallback(cleanQuery, limit).then(handleResults).catch(() => handleResults(null));
+    }, 500);
+  });
+}
+
 export async function searchSongs(query, limit = 12) {
   const cleanQuery = query.trim().toLowerCase();
   if (!cleanQuery) return [];
@@ -294,7 +341,12 @@ export async function searchSongs(query, limit = 12) {
     return cached.data;
   }
 
-  // 2. Prefix / Substring Local Cache Lookup (Instant typing responsiveness)
+  // 2. In-Flight Request Deduplication (share promise if already in-progress)
+  if (INFLIGHT_SEARCHES.has(cleanQuery)) {
+    return INFLIGHT_SEARCHES.get(cleanQuery);
+  }
+
+  // 3. Prefix / Substring Local Cache Lookup (Instant typing responsiveness)
   for (const [key, val] of CACHE.entries()) {
     if (key.includes(cleanQuery) || cleanQuery.includes(key)) {
       if (val.data && val.data.length >= 6) {
@@ -310,27 +362,31 @@ export async function searchSongs(query, limit = 12) {
     }
   }
 
-  // 3. Fast YouTubei Search (~1.2s instead of 3.0s)
-  let rawResults = await searchYouTubei(cleanQuery, 16);
+  const searchPromise = (async () => {
+    try {
+      // 4. Staggered concurrent race (guarantees fast return in <1.5s)
+      const rawResults = await fetchFastResults(cleanQuery, 16);
 
-  // 4. Fallback if YouTubei is restricted
-  if (!rawResults || rawResults.length === 0) {
-    rawResults = await searchFallback(cleanQuery, 16);
-  }
+      // Deduplicate and prioritize audio tracks over noisy video duplicates using Spotify-style ranking
+      const results = deduplicateAudioTracks(rawResults || [], cleanQuery, limit);
 
-  // Deduplicate and prioritize audio tracks over noisy video duplicates using Spotify-style ranking
-  const results = deduplicateAudioTracks(rawResults || [], cleanQuery, limit);
+      // Save to Cache
+      if (results && results.length > 0) {
+        if (CACHE.size >= CACHE_MAX_SIZE) {
+          const oldestKey = CACHE.keys().next().value;
+          CACHE.delete(oldestKey);
+        }
+        CACHE.set(cleanQuery, { data: results, timestamp: Date.now() });
+      }
 
-  // Save to Cache
-  if (results && results.length > 0) {
-    if (CACHE.size >= CACHE_MAX_SIZE) {
-      const oldestKey = CACHE.keys().next().value;
-      CACHE.delete(oldestKey);
+      return results || [];
+    } finally {
+      INFLIGHT_SEARCHES.delete(cleanQuery);
     }
-    CACHE.set(cleanQuery, { data: results, timestamp: Date.now() });
-  }
+  })();
 
-  return results || [];
+  INFLIGHT_SEARCHES.set(cleanQuery, searchPromise);
+  return searchPromise;
 }
 
 // Helper: extract simple core title without punctuation or features for strict similarity checks

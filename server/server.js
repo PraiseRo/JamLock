@@ -502,16 +502,32 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Disconnect
-  socket.on('disconnect', () => {
-    if (currentRoomId) {
-      const result = rooms.removeUser(socket.id);
-      if (result && result.isFullyDisconnected) {
-        io.to(result.room.id).emit('room-state', rooms.serializeRoom(result.room));
-        io.to(result.room.id).emit('user-left', { user: result.user });
+  // Realtime User Departure (Explicit Leave or Socket Disconnect)
+  const handleLeave = () => {
+    if (!currentRoomId) return;
+    const roomId = currentRoomId;
+    currentRoomId = null;
+    socket.leave(roomId);
+
+    const result = rooms.removeUser(socket.id);
+    if (result && result.isFullyDisconnected) {
+      io.to(result.room.id).emit('room-state', rooms.serializeRoom(result.room));
+      io.to(result.room.id).emit('user-left', { user: result.user });
+
+      if (result.newHost) {
+        io.to(result.room.id).emit('host-changed', { newHost: result.newHost });
+        io.to(result.room.id).emit('notification', {
+          type: 'info',
+          text: `👑 ${result.newHost.username} is now the room host!`
+        });
       }
+    } else if (result?.room) {
+      io.to(result.room.id).emit('room-state', rooms.serializeRoom(result.room));
     }
-  });
+  };
+
+  socket.on('leave-room', handleLeave);
+  socket.on('disconnect', handleLeave);
 });
 
 // Fallback to SPA index.html

@@ -114,6 +114,7 @@ const pauseIcon = document.getElementById('pause-icon');
 const skipBtn = document.getElementById('skip-btn');
 const forceResyncBtn = document.getElementById('force-resync-btn');
 const ambientGlow = document.getElementById('ambient-glow');
+const ambientArtBg = document.getElementById('ambient-art-bg');
 
 // Volume Controls DOM
 const muteBtn = document.getElementById('mute-btn');
@@ -551,11 +552,23 @@ cancelLeaveBtn?.addEventListener('click', () => {
 });
 
 confirmLeaveBtn?.addEventListener('click', () => {
+  try {
+    socket.emit('leave-room');
+  } catch (e) {}
   localStorage.removeItem('jamlock_current_room');
   localStorage.removeItem('beatsync_current_room');
   document.documentElement.classList.remove('in-room-loading');
   document.body.classList.remove('in-room-mode');
   window.location.href = window.location.origin + window.location.pathname;
+});
+
+// Instant departure notification if user closes or navigates away
+window.addEventListener('beforeunload', () => {
+  if (currentRoom) {
+    try {
+      socket.emit('leave-room');
+    } catch (e) {}
+  }
 });
 
 copyRoomLinkBtn?.addEventListener('click', async () => {
@@ -1036,15 +1049,30 @@ function startSyncEngine() {
         syncClock();
         if (currentRoom?.currentTrack && currentRoom.playback?.isPlaying) {
           syncWakeLock(true);
-          settlePending = true;
+          const serverPos = calculateServerPosition();
+
           if (activeEngine === 'audio' && nativeAudio) {
-            const drift = Math.abs((nativeAudio.currentTime || 0) - calculateServerPosition());
-            if (drift > DRIFT_HARD_SEEK_SEC) driftSeek(calculateServerPosition(), true);
-            if (nativeAudio.paused) nativeAudio.play().catch(() => {});
+            const drift = Math.abs((nativeAudio.currentTime || 0) - serverPos);
+            // Only seek if genuinely drifted outside tolerance (avoid audio hitch)
+            if (drift > DRIFT_HARD_SEEK_SEC) {
+              driftSeek(serverPos);
+            }
+            if (nativeAudio.paused) {
+              nativeAudio.play().catch(() => {});
+            }
           } else if (activeEngine === 'yt' && ytReady && ytPlayer) {
             try {
-              driftSeek(calculateServerPosition(), true);
-              ytPlayer.playVideo();
+              const local = (typeof ytPlayer.getCurrentTime === 'function' ? ytPlayer.getCurrentTime() : 0) || 0;
+              const state = typeof ytPlayer.getPlayerState === 'function' ? ytPlayer.getPlayerState() : -1;
+              const drift = Math.abs(local - serverPos);
+
+              // Never blindly seek if already playing smoothly within drift tolerance
+              if (drift > DRIFT_HARD_SEEK_SEC) {
+                driftSeek(serverPos);
+              }
+              if (state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING) {
+                ytPlayer.playVideo();
+              }
             } catch (e) {}
           }
         }
@@ -1130,6 +1158,10 @@ function loadCurrentTrack(room) {
     // Stop YouTube iframe so it never double-plays
     if (ytReady && ytPlayer && typeof ytPlayer.stopVideo === 'function') {
       try { ytPlayer.stopVideo(); } catch (e) {}
+    }
+    // Fade out ambient artwork back to dark theme
+    if (ambientArtBg) {
+      ambientArtBg.style.opacity = '0';
     }
 
     const startPos = Math.max(0, calculateServerPosition());
@@ -1503,7 +1535,7 @@ inlineSearchInput?.addEventListener('input', (e) => {
     } finally {
       searchSpinner?.classList.add('hidden');
     }
-  }, 180);
+  }, 260);
 });
 
 function renderSearchSkeletons(count = 4) {
@@ -1528,6 +1560,19 @@ function renderSearchSkeletons(count = 4) {
   searchResultsList.innerHTML = skeletons;
 }
 
+function getDisplayTitle(song) {
+  let t = song.cleanTitle || song.title || 'Untitled Track';
+  if (song.artist && t.includes(' - ')) {
+    const parts = t.split(' - ');
+    const p0 = parts[0].trim().toLowerCase();
+    const a = song.artist.trim().toLowerCase();
+    if (a.includes(p0) || p0.includes(a)) {
+      t = parts.slice(1).join(' - ').trim();
+    }
+  }
+  return t;
+}
+
 function renderSearchResults(items) {
   if (!searchResultsList) return;
   trendingSection?.classList.add('hidden');
@@ -1544,21 +1589,28 @@ function renderSearchResults(items) {
 
   searchResultsList.innerHTML = items.map((song) => {
     const songEncoded = encodeURIComponent(JSON.stringify(song));
+    const displayTitle = getDisplayTitle(song);
     return `
       <div class="row" onmouseenter="handleWarmup('${song.id}')" ontouchstart="handleWarmup('${song.id}')">
-        <button type="button" onclick="handlePlayNow('${songEncoded}')" class="art" style="border: 0; padding: 0; cursor: pointer; position: relative; overflow: hidden; background: url('${song.thumbnail}') center/cover" title="Play Now">
-          <div style="position: absolute; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=0">
+        <button type="button" onclick="handlePlayNow('${songEncoded}')" class="art-btn" style="background-image: url('${song.thumbnail}')" title="Play Now">
+          <div class="play-hint">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="var(--lime)"><path d="M8 5v14l11-7z"/></svg>
           </div>
         </button>
         <div style="flex: 1; min-width: 0; cursor: pointer" onclick="handlePlayNow('${songEncoded}')">
-          <div class="t">${escapeHtml(song.cleanTitle || song.title)}</div>
+          <div class="t" title="${escapeHtml(displayTitle)}">${escapeHtml(displayTitle)}</div>
           <div class="s">${escapeHtml(song.artist)}</div>
         </div>
-        <span class="mono">${song.duration}</span>
-        <button type="button" class="ghost" onclick="handleQueueSong('${songEncoded}', false)" style="height: 36px; padding: 0 16px; border-radius: 999px; border: 1px solid var(--border-outline); background: transparent; color: var(--text-main); font-size: 13px; font-weight: 600">
-          + Queue
-        </button>
+        <span class="mono" style="margin-right: 4px">${song.duration}</span>
+        <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0">
+          <button type="button" class="search-action-btn" onclick="handleQueueSong('${songEncoded}', false)" title="Add to Queue">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+            <span class="search-btn-label">Queue</span>
+          </button>
+          <button type="button" class="search-action-btn icon-only" title="Play Next" onclick="handleQueueSong('${songEncoded}', true)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+          </button>
+        </div>
       </div>
     `;
   }).join('');
@@ -1763,9 +1815,34 @@ socket.on('notification', ({ text, type }) => {
   showToast(text, type || 'info');
 });
 
+// Realtime User Departure & Host Promotion Listeners
+socket.on('user-left', ({ user }) => {
+  if (user?.username && user.username !== currentUser?.username) {
+    showToast(`${user.username} left the room`, 'info');
+  }
+});
+
+socket.on('host-changed', ({ newHost }) => {
+  if (currentUser && newHost && (newHost.clientId === currentUser.clientId || newHost.username === currentUser.username)) {
+    currentUser.isHost = true;
+    if (hostSettingsBtn) hostSettingsBtn.classList.remove('hidden');
+    showToast('You are now the room host! 👑', 'success');
+  } else if (newHost?.username) {
+    showToast(`${newHost.username} is now the room host`, 'info');
+  }
+});
+
 // --- 12. UI STATE RENDERING ---
 function renderRoomState(room) {
   if (!room) return;
+
+  // Sync current user's host status with room user list
+  if (currentUser && Array.isArray(room.users)) {
+    const myUserRecord = room.users.find(u => u.clientId === currentUser.clientId || u.username === currentUser.username);
+    if (myUserRecord && typeof myUserRecord.isHost === 'boolean') {
+      currentUser.isHost = myUserRecord.isHost;
+    }
+  }
 
   // Listening count
   if (listeningCountDisplay) {
@@ -1849,13 +1926,18 @@ function renderRoomState(room) {
       addedByText.textContent = room.currentTrack.addedBy || 'host';
     }
 
-    // Dynamic Ambient Backdrop from Album Color
+    // Dynamic Ambient Backdrop from Album Cover Art
+    if (ambientArtBg && room.currentTrack.thumbnail) {
+      ambientArtBg.style.backgroundImage = `url("${room.currentTrack.thumbnail}")`;
+      ambientArtBg.style.opacity = '0.52';
+    }
+
     if (heroBanner) {
       heroBanner.style.background = `
         linear-gradient(180deg, rgba(0,0,0,0.0), #0A0A0D 98%),
-        radial-gradient(700px 420px at 20% 30%, rgba(200,255,61,0.32), transparent 65%),
-        radial-gradient(700px 480px at 85% 10%, rgba(255,90,78,0.32), transparent 65%),
-        #14141A
+        radial-gradient(700px 420px at 20% 30%, rgba(200,255,61,0.24), transparent 65%),
+        radial-gradient(700px 480px at 85% 10%, rgba(255,90,78,0.24), transparent 65%),
+        rgba(20,20,26,0.6)
       `;
     }
 
@@ -1880,6 +1962,10 @@ function renderRoomState(room) {
     }
     if (ytReady && ytPlayer && typeof ytPlayer.stopVideo === 'function') {
       try { ytPlayer.stopVideo(); } catch (e) {}
+    }
+    // Fade out ambient artwork back to dark theme
+    if (ambientArtBg) {
+      ambientArtBg.style.opacity = '0';
     }
     updateMediaSessionMetadata(null);
     syncWakeLock(false);
