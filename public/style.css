@@ -84,6 +84,36 @@
   animation: partyPulse 1s ease-out;
 }
 
+/* Micro-Glass Action Pill (+3 Similar) */
+.similar-pill {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(200, 255, 61, 0.28);
+  background: rgba(200, 255, 61, 0.08);
+  color: var(--lime);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.similar-pill:hover {
+  background: rgba(200, 255, 61, 0.16);
+  border-color: var(--lime);
+  box-shadow: 0 0 14px rgba(200, 255, 61, 0.3);
+  transform: translateY(-1px);
+}
+
+.similar-pill:active {
+  transform: scale(0.96);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -156,18 +186,27 @@ button:focus-visible, input:focus-visible {
   outline-offset: 2px;
 }
 
-/* Isolated GPU Layer Card Component */
+/* Modern Frosted Glassmorphism Card Component */
 .card {
-  background: var(--surface);
-  border: 1px solid var(--border-card);
+  background: rgba(18, 18, 24, 0.76);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 28px;
   padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 16px;
   min-width: 0;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  position: relative;
   /* CSS Containment to stop page-wide reflows */
   contain: layout style;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card:hover {
+  border-color: rgba(255, 255, 255, 0.12);
 }
 
 .h2 {
@@ -516,6 +555,79 @@ button:focus-visible, input:focus-visible {
   filter: drop-shadow(0 0 10px var(--lime)) drop-shadow(0 0 16px var(--amber));
 }
 
+/* Cyber Capsule Playback Deck */
+.player-capsule-deck {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  background: rgba(18, 18, 24, 0.78);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  user-select: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.player-capsule-deck:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.capsule-dial-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+  user-select: none;
+}
+
+.capsule-dial-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text-main);
+  border-color: rgba(255, 255, 255, 0.24);
+  transform: scale(1.06);
+}
+
+.capsule-dial-btn:active {
+  transform: scale(0.92);
+}
+
+.capsule-hero-play {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 0;
+  background: var(--lime);
+  color: #0A0A0D;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 0 22px rgba(200, 255, 61, 0.45);
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.18s ease;
+  user-select: none;
+}
+
+.capsule-hero-play:hover {
+  transform: scale(1.08);
+  box-shadow: 0 0 30px rgba(200, 255, 61, 0.7);
+}
+
+.capsule-hero-play:active {
+  transform: scale(0.92);
+}
+
 /* Skip Vote Badge Pill */
 #skip-vote-pill {
   position: absolute;
@@ -740,13 +852,8 @@ button:focus-visible, input:focus-visible {
     display: flex !important;
     align-items: center !important;
     justify-content: center !important;
-    gap: 22px !important;
-    margin: 2px 0 0 !important;
-  }
-
-  .player-controls-cluster #play-pause-btn {
-    width: 52px !important;
-    height: 52px !important;
+    gap: 0 !important;
+    margin: 4px 0 2px !important;
   }
 
   /* Segmented Tab panels toggle logic on mobile */

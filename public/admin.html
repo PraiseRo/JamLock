@@ -35,18 +35,22 @@
       color: var(--text-main);
       font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
       min-height: 100vh;
-      padding: 24px;
+      padding: 16px 28px 40px;
       display: flex;
       flex-direction: column;
-      align-items: center;
+      align-items: stretch;
+      width: 100%;
+      box-sizing: border-box;
     }
 
     .container {
-      max-width: 1100px;
       width: 100%;
+      max-width: 100%;
       display: flex;
       flex-direction: column;
       gap: 24px;
+      margin: 0;
+      box-sizing: border-box;
     }
 
     header {
@@ -57,6 +61,7 @@
       border-bottom: 1px solid var(--border-card);
       flex-wrap: wrap;
       gap: 16px;
+      width: 100%;
     }
 
     .logo-badge {
@@ -128,18 +133,28 @@
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 16px;
+      width: 100%;
     }
 
     .card {
-      background: var(--surface);
-      border: 1px solid var(--border-card);
-      border-radius: 18px;
-      padding: 20px;
+      background: rgba(18, 18, 24, 0.76);
+      backdrop-filter: blur(24px) saturate(140%);
+      -webkit-backdrop-filter: blur(24px) saturate(140%);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 20px;
+      padding: 22px;
       display: flex;
       flex-direction: column;
       gap: 8px;
       position: relative;
       overflow: hidden;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+
+    .card:hover {
+      border-color: rgba(255, 255, 255, 0.16);
+      transform: translateY(-2px);
     }
 
     .card::before {
@@ -148,8 +163,8 @@
       top: 0;
       left: 0;
       right: 0;
-      height: 2px;
-      background: linear-gradient(90deg, transparent, rgba(200,255,61,0.2), transparent);
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(200,255,61,0.35), transparent);
     }
 
     .card-label {
@@ -195,10 +210,14 @@
     }
 
     .rooms-card {
-      background: var(--surface);
-      border: 1px solid var(--border-card);
-      border-radius: 18px;
+      background: rgba(18, 18, 24, 0.76);
+      backdrop-filter: blur(24px) saturate(140%);
+      -webkit-backdrop-filter: blur(24px) saturate(140%);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 20px;
       overflow: hidden;
+      width: 100%;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
     }
 
     table {
@@ -268,14 +287,14 @@
         <span style="font-size: 11px; font-family: 'JetBrains Mono', monospace; background: var(--surface-raised); padding: 3px 8px; border-radius: 999px; color: var(--lime)">ADMIN</span>
       </div>
 
-      <div class="key-bar">
-        <input type="password" id="admin-key" placeholder="Enter Admin Secret..." autocomplete="off">
-        <button type="button" id="refresh-btn">Load Stats</button>
-      </div>
+      <form id="admin-auth-form" class="key-bar" action="javascript:void(0);">
+        <input type="password" id="admin-key" placeholder="Enter Admin Secret..." autocomplete="current-password" required>
+        <button type="submit" id="refresh-btn">Load Stats</button>
+      </form>
     </header>
 
     <div id="auth-banner" class="auth-banner">
-      Invalid Admin Secret key. Please enter the correct password.
+      Invalid Admin Secret key. If you have not set a custom <code>ADMIN_SECRET</code> in Render, the default password is <strong>jamlock-secret-admin</strong>.
     </div>
 
     <!-- Top Key Metrics Cards -->
@@ -347,6 +366,7 @@
   </div>
 
   <script>
+    const adminAuthForm = document.getElementById('admin-auth-form');
     const adminKeyInput = document.getElementById('admin-key');
     const refreshBtn = document.getElementById('refresh-btn');
     const authBanner = document.getElementById('auth-banner');
@@ -371,10 +391,15 @@
       }
 
       try {
+        refreshBtn.textContent = 'Loading...';
+        refreshBtn.disabled = true;
         const res = await fetch(`/api/admin/stats?key=${encodeURIComponent(key)}`);
+        refreshBtn.textContent = 'Load Stats';
+        refreshBtn.disabled = false;
+
         if (!res.ok) {
           authBanner.style.display = 'block';
-          authBanner.textContent = 'Unauthorized: Invalid Admin Secret key.';
+          authBanner.innerHTML = 'Unauthorized: Invalid Admin Secret. If you have not set a custom <code>ADMIN_SECRET</code> in Render, the default password is <strong>jamlock-secret-admin</strong>.';
           return;
         }
 
@@ -383,6 +408,8 @@
         const data = await res.json();
         renderDashboard(data);
       } catch (err) {
+        refreshBtn.textContent = 'Load Stats';
+        refreshBtn.disabled = false;
         authBanner.style.display = 'block';
         authBanner.textContent = 'Failed to connect to server.';
       }
@@ -441,9 +468,9 @@
       }).join('');
     }
 
-    refreshBtn.addEventListener('click', fetchStats);
-    adminKeyInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') fetchStats();
+    adminAuthForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      fetchStats();
     });
 
     // Auto-fetch if key exists on load
