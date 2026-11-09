@@ -85,19 +85,18 @@ function getRequestClientId(req) {
   return verifySignedClientId(cookies[IDENTITY_COOKIE]);
 }
 
-function ensureIdentityCookie(req, res) {
-  if (getRequestClientId(req)) return;
-  const clientId = 'cid_' + crypto.randomBytes(16).toString('hex');
-  const value = `${clientId}.${signClientId(clientId)}`;
-  if (res && typeof res.cookie === 'function') {
-    res.cookie(IDENTITY_COOKIE, value, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: Boolean(req.secure),
-      maxAge: IDENTITY_MAX_AGE_MS,
-      path: '/'
-    });
+function ensureIdentityCookie(req, res, next) {
+  if (!getRequestClientId(req)) {
+    const clientId = 'cid_' + crypto.randomBytes(16).toString('hex');
+    const value = `${clientId}.${signClientId(clientId)}`;
+    const isHttps = Boolean(req.secure || req.headers['x-forwarded-proto'] === 'https');
+    const secureFlag = isHttps ? '; Secure' : '';
+    res.setHeader(
+      'Set-Cookie',
+      `${IDENTITY_COOKIE}=${encodeURIComponent(value)}; Max-Age=${Math.floor(IDENTITY_MAX_AGE_MS / 1000)}; Path=/; HttpOnly; SameSite=Lax${secureFlag}`
+    );
   }
+  next();
 }
 
 app.use(ensureIdentityCookie);
@@ -1419,7 +1418,7 @@ setInterval(() => {
   }
 }, 5000);
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🎵 JamLock Server running on http://localhost:${PORT}`);
+const PORT = Number(process.env.PORT) || 3000;
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🎵 JamLock Server running on http://0.0.0.0:${PORT}`);
 });
