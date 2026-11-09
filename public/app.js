@@ -1482,6 +1482,7 @@ window.onYouTubeIframeAPIReady = () => {
   ytPlayer = new YT.Player('yt-player', {
     height: '100%',
     width: '100%',
+    host: 'https://www.youtube-nocookie.com',
     playerVars: {
       autoplay: 1,
       controls: 0,
@@ -1663,6 +1664,14 @@ function startSyncEngine() {
           position: Math.max(0, Math.min(effectiveTime, duration))
         });
       } catch (e) {}
+    }
+
+    // Pre-warm the next queued track when within 15 seconds of current track ending
+    if (duration > 0 && effectiveTime >= duration - 15) {
+      const nextTrack = currentRoom?.queue?.[0];
+      if (nextTrack?.id && window.handleWarmup) {
+        window.handleWarmup(nextTrack.id);
+      }
     }
 
     updateDebugOverlay();
@@ -3248,4 +3257,59 @@ if ('serviceWorker' in navigator && window.location.protocol.startsWith('http'))
       console.warn('Service worker registration failed:', err);
     });
   });
+}
+
+// --- PWA INSTALL PROMPT ORCHESTRATION ---
+let deferredInstallPrompt = null;
+const pwaInstallBtn = document.getElementById('pwa-install-btn');
+const iosPwaModal = document.getElementById('ios-pwa-modal');
+const closeIosPwaBtn = document.getElementById('close-ios-pwa-btn');
+const dismissIosPwaBtn = document.getElementById('dismiss-ios-pwa-btn');
+
+const isIOS = /ipad|iphone|ipod/i.test(navigator.userAgent) && !window.MSStream;
+const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+
+// Android / Desktop Chrome 1-tap install
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  if (pwaInstallBtn && !isStandalone) {
+    pwaInstallBtn.classList.remove('hidden');
+    pwaInstallBtn.style.display = 'inline-flex';
+  }
+});
+
+pwaInstallBtn?.addEventListener('click', async () => {
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    const { outcome } = await deferredInstallPrompt.userChoice;
+    if (outcome === 'accepted') {
+      pwaInstallBtn.style.display = 'none';
+    }
+    deferredInstallPrompt = null;
+  } else if (isIOS) {
+    showIosInstallModal();
+  }
+});
+
+function showIosInstallModal() {
+  if (!iosPwaModal) return;
+  iosPwaModal.classList.remove('hidden');
+  iosPwaModal.style.display = 'flex';
+}
+
+function closeIosInstallModal() {
+  if (!iosPwaModal) return;
+  iosPwaModal.classList.add('hidden');
+  iosPwaModal.style.display = 'none';
+  try { localStorage.setItem('jamlock_ios_prompt_dismissed', '1'); } catch (e) {}
+}
+
+closeIosPwaBtn?.addEventListener('click', closeIosInstallModal);
+dismissIosPwaBtn?.addEventListener('click', closeIosInstallModal);
+
+// If iOS Safari visitor (not already installed as PWA) and haven't dismissed before, reveal Install App button
+if (isIOS && !isStandalone && pwaInstallBtn) {
+  pwaInstallBtn.classList.remove('hidden');
+  pwaInstallBtn.style.display = 'inline-flex';
 }

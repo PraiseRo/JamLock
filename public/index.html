@@ -23,6 +23,11 @@
   <meta name="twitter:description" content="Zero logins, zero setup. Jump into a shared music room and listen with friends at the exact same second.">
   <meta name="twitter:image" content="https://jamlock.onrender.com/og-preview.jpg">
 
+  <!-- DNS & Edge Preconnects for YouTube Audio Playback -->
+  <link rel="preconnect" href="https://www.youtube-nocookie.com">
+  <link rel="preconnect" href="https://googlevideo.com" crossorigin>
+  <link rel="dns-prefetch" href="https://i.ytimg.com">
+
   <!-- Theme Color & PWA Manifest -->
   <meta name="theme-color" content="#0A0A0D">
   <link rel="manifest" href="/manifest.json">
@@ -86,9 +91,13 @@
   <div id="lobby-view" style="position: relative; z-index: 10; min-height: 100vh; display: flex; flex-direction: column; justify-content: center; padding: 28px 24px 56px; box-sizing: border-box">
     <div style="max-width: 1180px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 48px">
       
-      <!-- Top Brand Header -->
-      <div style="display: flex; align-items: center">
+      <!-- Top Brand Header & PWA Install Action -->
+      <div style="display: flex; align-items: center; justify-content: space-between">
         <img id="lobby-brand-logo" src="/logo.webp" alt="JamLock" style="height: 48px; width: auto; object-fit: contain; max-width: 200px; margin-left: -6px">
+        <button id="pwa-install-btn" type="button" class="glass-btn-ghost hidden" style="height: 38px; padding: 0 16px; border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--lime); display: inline-flex; align-items: center; gap: 8px; cursor: pointer">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>Install App</span>
+        </button>
       </div>
 
       <!-- Two-Column Hero / Action Section -->
@@ -629,6 +638,30 @@
           Leave Room
         </button>
       </div>
+    </div>
+  </div>
+
+  <!-- iOS Safari Add to Home Screen Prompt Modal -->
+  <div id="ios-pwa-modal" class="hidden" style="position: fixed; inset: 0; z-index: 9999; display: none; align-items: flex-end; justify-content: center; padding: 16px; background: rgba(0,0,0,0.78); backdrop-filter: blur(8px)">
+    <div class="glass-card animate-scaleUp" style="max-width: 400px; width: 100%; border-radius: 24px; padding: 24px; display: flex; flex-direction: column; gap: 16px; margin-bottom: 24px">
+      <div style="display: flex; align-items: center; justify-content: space-between">
+        <div style="font-size: 16px; font-weight: 700; color: var(--lime); display: flex; align-items: center; gap: 8px">
+          <span>📲 Install JamLock</span>
+        </div>
+        <button id="close-ios-pwa-btn" type="button" style="background: transparent; border: 0; color: var(--text-muted); cursor: pointer; padding: 4px">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <p style="margin: 0; font-size: 14px; line-height: 1.5; color: var(--text-secondary)">
+        Install JamLock on your iPhone for full-screen music and continuous background playback:
+      </p>
+      <div style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 14px 16px; font-size: 13px; line-height: 1.6; display: flex; flex-direction: column; gap: 8px">
+        <div>1. Tap the <strong>Share</strong> button <span style="display: inline-block; padding: 2px 6px; border-radius: 6px; background: rgba(255,255,255,0.1)">⎋</span> at the bottom of Safari.</div>
+        <div>2. Scroll down and tap <strong>"Add to Home Screen"</strong> <span style="display: inline-block; padding: 2px 6px; border-radius: 6px; background: rgba(255,255,255,0.1)">+</span>.</div>
+      </div>
+      <button id="dismiss-ios-pwa-btn" type="button" class="glass-hero-btn" style="height: 44px; border-radius: 12px; border: 0; font-weight: 700; font-size: 14px">
+        Got It!
+      </button>
     </div>
   </div>
 
