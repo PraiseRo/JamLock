@@ -2457,17 +2457,6 @@ function renderSearchResults(items, isInstantPreview = false) {
     `;
   }).join('');
 }
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-            <span class="search-btn-label">Queue</span>
-          </button>
-          <button type="button" class="search-action-btn icon-only" title="Play Next" data-search-idx="${idx}" data-search-action="play-next">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
-          </button>
-        </div>
-      </div>
-    `;
-  }).join('');
-}
 
 // Clean event delegation for search result actions (handles apostrophes & special characters flawlessly)
 searchResultsList?.addEventListener('click', (e) => {
