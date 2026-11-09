@@ -2191,13 +2191,114 @@ forceResyncBtn?.addEventListener('click', () => {
   });
 });
 
-// --- 8. REALTIME SEARCH & TRENDING CHIPS ---
+// --- 8. REALTIME SEARCH & SPOTIFY-STYLE LOCAL-FIRST INDEX ---
 const CLIENT_SEARCH_CACHE = new Map();
 let searchAbortController = null;
+let searchSeqId = 0;
+
+// Local-First Prefix & Recents Search Engine
+class LocalSearchEngine {
+  constructor() {
+    this.trackMap = new Map(); // id -> track object
+    this.recentSearches = [];
+    this.init();
+  }
+
+  init() {
+    try {
+      const stored = localStorage.getItem('jamlock_recent_searches');
+      if (stored) {
+        this.recentSearches = JSON.parse(stored).slice(0, 15);
+      }
+      const storedTracks = localStorage.getItem('jamlock_local_catalog');
+      if (storedTracks) {
+        const parsed = JSON.parse(storedTracks);
+        if (Array.isArray(parsed)) {
+          parsed.forEach(t => this.indexTrack(t, false));
+        }
+      }
+    } catch (e) {
+      console.warn('[LocalSearchEngine] init error:', e);
+    }
+  }
+
+  save() {
+    try {
+      localStorage.setItem('jamlock_recent_searches', JSON.stringify(this.recentSearches));
+      // Save top 80 most relevant tracks to keep localStorage small & fast
+      const slice = Array.from(this.trackMap.values()).slice(0, 80);
+      localStorage.setItem('jamlock_local_catalog', JSON.stringify(slice));
+    } catch (e) {}
+  }
+
+  indexTrack(track, shouldSave = true) {
+    if (!track || !track.id) return;
+    this.trackMap.set(track.id, {
+      id: track.id,
+      title: track.title || 'Unknown Track',
+      cleanTitle: track.cleanTitle || track.title || '',
+      artist: track.artist || 'Unknown Artist',
+      duration: track.duration || '0:00',
+      thumbnail: track.thumbnail || '',
+      url: track.url || ''
+    });
+    if (shouldSave) this.save();
+  }
+
+  indexTracks(tracks) {
+    if (!Array.isArray(tracks)) return;
+    tracks.forEach(t => this.indexTrack(t, false));
+    this.save();
+  }
+
+  recordRecent(query) {
+    const q = (query || '').trim();
+    if (!q || q.length < 2) return;
+    this.recentSearches = [q, ...this.recentSearches.filter(s => s.toLowerCase() !== q.toLowerCase())].slice(0, 10);
+    this.save();
+  }
+
+  search(query, limit = 8) {
+    const q = (query || '').toLowerCase().trim();
+    if (!q) return [];
+    const results = [];
+    
+    // Multi-tier ranking:
+    // 1. Title/Artist starts with query
+    // 2. Word boundary starts with query
+    // 3. Substring match
+    const tier1 = [];
+    const tier2 = [];
+    const tier3 = [];
+
+    for (const track of this.trackMap.values()) {
+      const title = (track.cleanTitle || track.title || '').toLowerCase();
+      const artist = (track.artist || '').toLowerCase();
+
+      if (title.startsWith(q) || artist.startsWith(q)) {
+        tier1.push(track);
+      } else if (new RegExp(`\\b${q}`, 'i').test(title) || new RegExp(`\\b${q}`, 'i').test(artist)) {
+        tier2.push(track);
+      } else if (title.includes(q) || artist.includes(q)) {
+        tier3.push(track);
+      }
+      if (tier1.length >= limit) break;
+    }
+
+    const merged = [...tier1, ...tier2, ...tier3];
+    return merged.slice(0, limit);
+  }
+}
+
+const localSearch = new LocalSearchEngine();
+
+// Expose indexing globally so played, queued, or room tracks get automatically indexed
+window.indexTrackForSearch = (track) => localSearch.indexTrack(track);
 
 inlineSearchInput?.addEventListener('input', (e) => {
   clearTimeout(searchDebounceTimer);
   const q = e.target.value.trim();
+  const currentSeq = ++searchSeqId;
 
   if (q.length < 2) {
     searchResultsSection?.classList.add('hidden');
@@ -2207,39 +2308,55 @@ inlineSearchInput?.addEventListener('input', (e) => {
 
   searchEmptyPrompt?.classList.add('hidden');
 
-  // Instant Client Cache hit
+  // Instant Tier 1: Client in-memory exact search cache (0ms)
   const cached = CLIENT_SEARCH_CACHE.get(q.toLowerCase());
-  if (cached) {
+  if (cached && cached.length > 0) {
     renderSearchResults(cached);
     return;
+  }
+
+  // Instant Tier 2: Local-first prefix trie/index match (0ms instant preview)
+  const localMatches = localSearch.search(q, 6);
+  if (localMatches.length > 0) {
+    renderSearchResults(localMatches, true); // true = instant preview
+  } else {
+    // Show non-blocking skeleton placeholder cards while network fetches
+    renderSearchSkeletons();
   }
 
   if (searchAbortController) searchAbortController.abort();
   searchAbortController = new AbortController();
 
+  // Tier 3: Debounced high-speed network fetch (180ms Spotify standard)
   searchDebounceTimer = setTimeout(async () => {
-    // Show skeleton placeholder rows right before network fetch
-    renderSearchSkeletons();
     searchSpinner?.classList.remove('hidden');
-
     const searchStart = performance.now();
     try {
       const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, {
         signal: searchAbortController.signal
       });
+      if (currentSeq !== searchSeqId) return; // Stale query superseded by faster typing
+
       const results = await res.json();
+      if (currentSeq !== searchSeqId) return;
+
       const roundtripMs = (performance.now() - searchStart).toFixed(0);
       const serverCache = res.headers.get('X-Cache') || 'UNKNOWN';
       const serverDuration = res.headers.get('X-Response-Time-Ms') || '?';
       console.log(`[CLIENT-SEARCH] "${q}" took ${roundtripMs}ms roundtrip (Server: ${serverDuration}ms, Cache: ${serverCache}, Count: ${results?.length || 0})`);
+
       CLIENT_SEARCH_CACHE.set(q.toLowerCase(), results);
-      renderSearchResults(results);
+      localSearch.indexTracks(results);
+      localSearch.recordRecent(q);
+      renderSearchResults(results, false);
     } catch (err) {
       if (err.name !== 'AbortError') console.error('Search error:', err);
     } finally {
-      searchSpinner?.classList.add('hidden');
+      if (currentSeq === searchSeqId) {
+        searchSpinner?.classList.add('hidden');
+      }
     }
-  }, 280);
+  }, 180);
 });
 
 function renderSearchSkeletons(count = 4) {
@@ -2279,7 +2396,7 @@ function getDisplayTitle(song) {
 
 let currentSearchResults = [];
 
-function renderSearchResults(items) {
+function renderSearchResults(items, isInstantPreview = false) {
   if (!searchResultsList) return;
   trendingSection?.classList.add('hidden');
   searchResultsSection?.classList.remove('hidden');
@@ -2295,7 +2412,14 @@ function renderSearchResults(items) {
     return;
   }
 
-  searchResultsList.innerHTML = items.map((song, idx) => {
+  const badgeHtml = isInstantPreview ? `
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 4px 8px 8px; font-size: 11px; font-weight: 700; color: var(--lime); letter-spacing: 0.05em; text-transform: uppercase">
+      <span>⚡ Instant Match</span>
+      <span style="opacity: 0.7; font-weight: 500">Searching web...</span>
+    </div>
+  ` : '';
+
+  searchResultsList.innerHTML = badgeHtml + items.map((song, idx) => {
     const displayTitle = getDisplayTitle(song);
     return `
       <div class="row" onmouseenter="handleWarmup('${song.id}')">
@@ -2311,6 +2435,17 @@ function renderSearchResults(items) {
         <span class="mono" style="margin-right: 4px">${song.duration}</span>
         <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0">
           <button type="button" class="search-action-btn" data-search-idx="${idx}" data-search-action="queue" title="Add to Queue">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+            <span class="search-btn-label">Queue</span>
+          </button>
+          <button type="button" class="search-action-btn icon-only" title="Play Next" data-search-idx="${idx}" data-search-action="play-next">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
             <span class="search-btn-label">Queue</span>
           </button>
