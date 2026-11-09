@@ -53,3 +53,7 @@ $RECYCLE.BIN/
 .cache/
 .parcel-cache/
 .eslintcache
+
+# Server dynamic runtime data
+data/
+*.db
