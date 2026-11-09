@@ -1,9 +1,9 @@
 // JamLock Production Service Worker (App Shell & Cold-Start Accelerator)
-const CACHE_NAME = 'jamlock-v13';
+const CACHE_NAME = 'jamlock-v14';
 const PRECACHE_ASSETS = [
   '/',
-  '/style.css',
-  '/app.js',
+  '/style.css?v=2.1',
+  '/app.js?v=2.1',
   '/logo.webp',
   '/favicon-32x32.png',
   '/apple-touch-icon.png',
@@ -15,8 +15,11 @@ const PRECACHE_ASSETS = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(PRECACHE_ASSETS);
+    caches.open(CACHE_NAME).then(async (cache) => {
+      // Resilient precaching: fetch all assets, never reject install on one missing optional item
+      await Promise.allSettled(
+        PRECACHE_ASSETS.map((asset) => cache.add(asset).catch((err) => console.warn('[SW] Precache skip:', asset, err)))
+      );
     }).then(() => self.skipWaiting())
   );
 });

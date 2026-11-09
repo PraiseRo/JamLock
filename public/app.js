@@ -2168,9 +2168,30 @@ playPauseBtn?.addEventListener('click', () => {
     }
   } catch (e) {}
 
+  // Instant Optimistic Play/Pause (0ms perceived latency on mobile & desktop)
   if (isPlaying) {
+    // 1. Immediately toggle UI icons
+    playIcon?.classList.remove('hidden');
+    pauseIcon?.classList.add('hidden');
+    currentRoom.playback.isPlaying = false;
+    // 2. Immediately pause audio locally without waiting for server network roundtrip
+    if (activeEngine === 'audio' && nativeAudio && !nativeAudio.paused) {
+      try { nativeAudio.pause(); } catch (e) {}
+    } else if (ytReady && ytPlayer && typeof ytPlayer.pauseVideo === 'function') {
+      try { ytPlayer.pauseVideo(); } catch (e) {}
+    }
     socket.emit('pause', { positionSec: currentPos });
   } else {
+    // 1. Immediately toggle UI icons
+    playIcon?.classList.add('hidden');
+    pauseIcon?.classList.remove('hidden');
+    currentRoom.playback.isPlaying = true;
+    // 2. Immediately play audio locally without waiting for server network roundtrip
+    if (activeEngine === 'audio' && nativeAudio && nativeAudio.paused) {
+      nativeAudio.play().catch(() => {});
+    } else if (ytReady && ytPlayer && typeof ytPlayer.playVideo === 'function') {
+      try { ytPlayer.playVideo(); } catch (e) {}
+    }
     socket.emit('play', { positionSec: currentPos });
   }
 });
@@ -2433,7 +2454,7 @@ function renderSearchResults(items, isInstantPreview = false) {
   searchResultsList.innerHTML = badgeHtml + items.map((song, idx) => {
     const displayTitle = getDisplayTitle(song);
     return `
-      <div class="row" onmouseenter="handleWarmup('${song.id}')">
+      <div class="row" onmouseenter="handleWarmup('${song.id}')" onpointerdown="handleWarmup('${song.id}')" ontouchstart="handleWarmup('${song.id}')">
         <button type="button" class="art-btn" data-search-idx="${idx}" data-search-action="play-now" style="background-image: url('${song.thumbnail}')" title="Play Now">
           <div class="play-hint">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="var(--lime)"><path d="M8 5v14l11-7z"/></svg>
@@ -2456,6 +2477,11 @@ function renderSearchResults(items, isInstantPreview = false) {
       </div>
     `;
   }).join('');
+
+  // Proactive Acceleration: automatically warm up the #1 ranked track immediately upon results render
+  if (items[0]?.id && window.handleWarmup) {
+    window.handleWarmup(items[0].id);
+  }
 }
 
 // Clean event delegation for search result actions (handles apostrophes & special characters flawlessly)
@@ -3277,15 +3303,30 @@ window.addEventListener('beforeinstallprompt', (e) => {
   deferredInstallPrompt = e;
 });
 
+// Cleanly handle successful OS app installation
+window.addEventListener('appinstalled', () => {
+  if (pwaInstallBtn) pwaInstallBtn.style.display = 'none';
+  if (roomPwaInstallBtn) roomPwaInstallBtn.style.display = 'none';
+  deferredInstallPrompt = null;
+  showToast('JamLock installed successfully! 🎉', 'success');
+});
+
 async function handleInstallTrigger() {
   if (deferredInstallPrompt) {
-    deferredInstallPrompt.prompt();
-    const { outcome } = await deferredInstallPrompt.userChoice;
-    if (outcome === 'accepted') {
-      if (pwaInstallBtn) pwaInstallBtn.style.display = 'none';
-      if (roomPwaInstallBtn) roomPwaInstallBtn.style.display = 'none';
+    try {
+      showToast('Opening install prompt...', 'info');
+      await deferredInstallPrompt.prompt();
+      const choicePromise = deferredInstallPrompt.userChoice;
+      // 8-second timeout failsafe so button never hangs if user dismisses native dialog
+      const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({ outcome: 'dismissed' }), 8000));
+      const { outcome } = await Promise.race([choicePromise, timeoutPromise]);
+      if (outcome === 'accepted') {
+        if (pwaInstallBtn) pwaInstallBtn.style.display = 'none';
+        if (roomPwaInstallBtn) roomPwaInstallBtn.style.display = 'none';
+      }
+    } catch (err) {
+      console.warn('[PWA] Prompt error:', err);
     }
-    deferredInstallPrompt = null;
   } else if (isIOS) {
     showIosInstallModal();
   } else {
