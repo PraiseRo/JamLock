@@ -1677,7 +1677,9 @@ function startSyncEngine() {
     updateDebugOverlay();
   };
 
-  syncInterval = setInterval(runSyncTick, 400);
+  // Run sync loop every 800ms on mobile devices to preserve CPU and battery, 400ms on desktop
+  const syncTickRateMs = isMobileClient ? 800 : 400;
+  syncInterval = setInterval(runSyncTick, syncTickRateMs);
 
   // Background & foreground transitions: native <audio> continues playing in background;
   // when returning to the app, resync clock and align immediately.
