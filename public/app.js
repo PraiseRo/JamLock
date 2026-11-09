@@ -3253,6 +3253,7 @@ if ('serviceWorker' in navigator && window.location.protocol.startsWith('http'))
 // --- PWA INSTALL PROMPT ORCHESTRATION ---
 let deferredInstallPrompt = null;
 const pwaInstallBtn = document.getElementById('pwa-install-btn');
+const roomPwaInstallBtn = document.getElementById('room-pwa-install-btn');
 const iosPwaModal = document.getElementById('ios-pwa-modal');
 const closeIosPwaBtn = document.getElementById('close-ios-pwa-btn');
 const dismissIosPwaBtn = document.getElementById('dismiss-ios-pwa-btn');
@@ -3260,28 +3261,41 @@ const dismissIosPwaBtn = document.getElementById('dismiss-ios-pwa-btn');
 const isIOS = /ipad|iphone|ipod/i.test(navigator.userAgent) && !window.MSStream;
 const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 
+// If user is already running the installed app, hide install buttons permanently
+if (isStandalone) {
+  if (pwaInstallBtn) pwaInstallBtn.style.display = 'none';
+  if (roomPwaInstallBtn) roomPwaInstallBtn.style.display = 'none';
+} else {
+  // If in browser tab, make sure the install buttons stay visible
+  if (pwaInstallBtn) pwaInstallBtn.style.display = 'inline-flex';
+  if (roomPwaInstallBtn) roomPwaInstallBtn.style.display = 'inline-flex';
+}
+
 // Android / Desktop Chrome 1-tap install
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
   deferredInstallPrompt = e;
-  if (pwaInstallBtn && !isStandalone) {
-    pwaInstallBtn.classList.remove('hidden');
-    pwaInstallBtn.style.display = 'inline-flex';
-  }
 });
 
-pwaInstallBtn?.addEventListener('click', async () => {
+async function handleInstallTrigger() {
   if (deferredInstallPrompt) {
     deferredInstallPrompt.prompt();
     const { outcome } = await deferredInstallPrompt.userChoice;
     if (outcome === 'accepted') {
-      pwaInstallBtn.style.display = 'none';
+      if (pwaInstallBtn) pwaInstallBtn.style.display = 'none';
+      if (roomPwaInstallBtn) roomPwaInstallBtn.style.display = 'none';
     }
     deferredInstallPrompt = null;
   } else if (isIOS) {
     showIosInstallModal();
+  } else {
+    // Desktop Chrome / Edge fallback instruction
+    showToast('To install: click the Install icon (⊕) in your browser address bar', 'info');
   }
-});
+}
+
+pwaInstallBtn?.addEventListener('click', handleInstallTrigger);
+roomPwaInstallBtn?.addEventListener('click', handleInstallTrigger);
 
 function showIosInstallModal() {
   if (!iosPwaModal) return;
@@ -3298,9 +3312,3 @@ function closeIosInstallModal() {
 
 closeIosPwaBtn?.addEventListener('click', closeIosInstallModal);
 dismissIosPwaBtn?.addEventListener('click', closeIosInstallModal);
-
-// If iOS Safari visitor (not already installed as PWA) and haven't dismissed before, reveal Install App button
-if (isIOS && !isStandalone && pwaInstallBtn) {
-  pwaInstallBtn.classList.remove('hidden');
-  pwaInstallBtn.style.display = 'inline-flex';
-}
