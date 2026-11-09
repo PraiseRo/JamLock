@@ -382,6 +382,12 @@
       if (savedKey) adminKeyInput.value = savedKey;
     }
 
+    function escapeHtml(str) {
+      return String(str ?? '').replace(/[&<>"']/g, (m) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[m]));
+    }
+
     async function fetchStats() {
       const key = adminKeyInput.value.trim();
       if (!key) {
@@ -393,13 +399,17 @@
       try {
         refreshBtn.textContent = 'Loading...';
         refreshBtn.disabled = true;
-        const res = await fetch(`/api/admin/stats?key=${encodeURIComponent(key)}`);
+        const res = await fetch('/api/admin/stats', {
+          headers: {
+            'x-admin-key': key
+          }
+        });
         refreshBtn.textContent = 'Load Stats';
         refreshBtn.disabled = false;
 
         if (!res.ok) {
           authBanner.style.display = 'block';
-          authBanner.innerHTML = 'Unauthorized: Invalid Admin Secret. If you have not set a custom <code>ADMIN_SECRET</code> in Render, the default password is <strong>jamlock-secret-admin</strong>.';
+          authBanner.textContent = 'Unauthorized: Invalid Admin Secret.';
           return;
         }
 
@@ -443,7 +453,9 @@
       }
 
       tbody.innerHTML = live.activeRooms.map((r) => {
-        const trackTitle = r.currentTrack ? `${r.currentTrack.title} - ${r.currentTrack.artist}` : 'None';
+        const titleSafe = r.currentTrack ? escapeHtml(`${r.currentTrack.title} - ${r.currentTrack.artist}`) : 'None';
+        const idSafe = escapeHtml(r.id);
+        const themeSafe = escapeHtml(r.theme);
         const statusBadge = r.isPlaying
           ? '<span class="badge-playing">▶ Playing</span>'
           : '<span class="badge-idle">⏸ Paused / Stopped</span>';
@@ -453,16 +465,16 @@
             <td>
               <span class="room-code-badge">
                 <span class="live-dot" style="width: 6px; height: 6px"></span>
-                ${r.id}
+                ${idSafe}
               </span>
             </td>
-            <td><strong>${r.listeners}</strong></td>
+            <td><strong>${Number(r.listeners) || 0}</strong></td>
             <td>${statusBadge}</td>
-            <td style="max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" title="${trackTitle}">
-              ${trackTitle}
+            <td style="max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" title="${titleSafe}">
+              ${titleSafe}
             </td>
-            <td>${r.queueLength} upcoming</td>
-            <td><span style="text-transform: capitalize">${r.theme}</span></td>
+            <td>${Number(r.queueLength) || 0} upcoming</td>
+            <td><span style="text-transform: capitalize">${themeSafe}</span></td>
           </tr>
         `;
       }).join('');
@@ -478,8 +490,9 @@
       fetchStats();
     }
 
-    // Auto-refresh every 5 seconds
+    // Auto-refresh every 5 seconds (paused if tab is hidden)
     setInterval(() => {
+      if (document.hidden) return;
       if (adminKeyInput.value.trim() && authBanner.style.display !== 'block') {
         fetchStats();
       }

@@ -3,6 +3,7 @@ import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -14,17 +15,98 @@ import { metrics } from './metrics.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
+const ALLOWED_ORIGIN = process.env.APP_ORIGIN || '';
+const IDENTITY_SECRET = process.env.IDENTITY_SECRET || crypto.randomBytes(32).toString('hex');
+const IDENTITY_COOKIE = 'jl_identity';
+const IDENTITY_MAX_AGE_MS = 365 * 24 * 60 * 60 * 1000;
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
-  }
+  maxHttpBufferSize: 64 * 1024,
+  ...(ALLOWED_ORIGIN ? { cors: { origin: ALLOWED_ORIGIN, methods: ['GET', 'POST'] } } : {})
 });
 
-app.use(cors());
-app.use(express.json());
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+
+// Cross-origin access is opt-in; the app itself is same-origin, so no CORS is needed by default.
+if (ALLOWED_ORIGIN) app.use(cors({ origin: ALLOWED_ORIGIN }));
+app.use(express.json({ limit: '32kb' }));
+
+// Baseline security headers (no CSP yet: the app intentionally uses inline styles)
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
+
+// --- Anonymous, server-signed browser identity ---
+// clientId values are public (they appear in room state), so they must never be trusted as credentials.
+// Only a value carrying a valid HMAC signature is accepted. Multi-tab and reconnects share the cookie.
+function parseCookieHeader(header = '') {
+  const out = {};
+  for (const part of String(header).split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    if (!key) continue;
+    try {
+      out[key] = decodeURIComponent(part.slice(idx + 1).trim());
+    } catch (e) {
+      out[key] = part.slice(idx + 1).trim();
+    }
+  }
+  return out;
+}
+
+function signClientId(clientId) {
+  return crypto.createHmac('sha256', IDENTITY_SECRET).update(String(clientId)).digest('base64url').slice(0, 32);
+}
+
+function verifySignedClientId(value) {
+  if (typeof value !== 'string') return null;
+  const dot = value.lastIndexOf('.');
+  if (dot <= 0) return null;
+  const clientId = value.slice(0, dot);
+  const signature = value.slice(dot + 1);
+  if (!/^cid_[a-f0-9]{32}$/.test(clientId) || !/^[A-Za-z0-9_-]{32}$/.test(signature)) return null;
+  const expected = signClientId(clientId);
+  const a = Buffer.from(signature);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b) ? clientId : null;
+}
+
+function getRequestClientId(req) {
+  const cookies = parseCookieHeader(req?.headers?.cookie || '');
+  return verifySignedClientId(cookies[IDENTITY_COOKIE]);
+}
+
+function ensureIdentityCookie(req, res) {
+  if (getRequestClientId(req)) return;
+  const clientId = 'cid_' + crypto.randomBytes(16).toString('hex');
+  const value = `${clientId}.${signClientId(clientId)}`;
+  if (res && typeof res.cookie === 'function') {
+    res.cookie(IDENTITY_COOKIE, value, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: Boolean(req.secure),
+      maxAge: IDENTITY_MAX_AGE_MS,
+      path: '/'
+    });
+  }
+}
+
+app.use(ensureIdentityCookie);
+
+io.use((socket, next) => {
+  // Raw clients without the signed cookie get a unique per-socket identity.
+  socket.data.clientId = getRequestClientId(socket.request) || ('cid_' + crypto.randomBytes(16).toString('hex'));
+  next();
+});
 
 // Serve static frontend files
 const publicDir = path.join(__dirname, '../public');
@@ -32,24 +114,76 @@ app.use(express.static(publicDir));
 
 // --- Server-authoritative helpers ---
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
+
+function cleanText(value, maxLength = 200) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function timingSafeStringEqual(a, b) {
+  const left = Buffer.from(String(a ?? ''));
+  const right = Buffer.from(String(b ?? ''));
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
 // Validate/normalise a client-supplied track so clients can't inject arbitrary objects
 function sanitizeTrack(t, addedBy) {
   if (!t || typeof t.id !== 'string' || !/^[\w-]{6,20}$/.test(t.id)) return null;
   const thumb = typeof t.thumbnail === 'string' && /^https:\/\/[^'"\s<>()]{1,300}$/.test(t.thumbnail)
     ? t.thumbnail
     : `https://i.ytimg.com/vi/${t.id}/hqdefault.jpg`;
-  const title = String(t.title || 'Untitled Track').slice(0, 200);
+  const title = cleanText(t.title || 'Untitled Track', 200);
   return {
     id: t.id,
     title,
-    cleanTitle: String(t.cleanTitle || title).slice(0, 200),
-    artist: String(t.artist || 'Unknown Artist').slice(0, 120),
-    duration: String(t.duration || '0:00').slice(0, 12),
+    cleanTitle: cleanText(t.cleanTitle || title, 200),
+    artist: cleanText(t.artist || 'Unknown Artist', 120),
+    duration: cleanText(t.duration || '0:00', 12),
     durationSeconds: Math.max(0, Math.min(Number(t.durationSeconds) || 0, 6 * 3600)),
     thumbnail: thumb,
     url: `https://www.youtube.com/watch?v=${t.id}`,
-    addedBy: addedBy ? String(addedBy).slice(0, 25) : undefined
+    addedBy: addedBy ? cleanText(addedBy, 25) : undefined
   };
+}
+
+// Every socket event goes through this boundary so one malformed payload can never
+// take down the process (Socket.IO does not catch listener exceptions).
+function reportSocketError(socket, event, err) {
+  console.error(`[socket:${event}]`, err?.stack || err);
+  try {
+    socket.emit('notification', {
+      type: 'error',
+      text: 'Something went wrong on the server. Please try again.'
+    });
+  } catch (e) {}
+}
+
+function safeOn(socket, event, handler) {
+  socket.on(event, (...args) => {
+    try {
+      const result = handler(...args);
+      if (result && typeof result.then === 'function') {
+        result.catch((err) => reportSocketError(socket, event, err));
+      }
+    } catch (err) {
+      const ack = args.find((arg) => typeof arg === 'function');
+      if (ack) {
+        try { ack({ success: false, error: 'Server error' }); } catch (e) {}
+      }
+      reportSocketError(socket, event, err);
+    }
+  });
 }
 
 // Advance to the next track (queue -> auto-suggest -> stop) and broadcast
@@ -231,6 +365,57 @@ function checkSearchRateLimit(ip) {
   return bucket.tryConsume(1);
 }
 
+// --- Socket join throttle & PIN brute-force lockout ---
+const joinBuckets = new Map();
+const pinFailures = new Map();
+const PIN_FAILURE_WINDOW_MS = 10 * 60 * 1000;
+const PIN_MAX_FAILURES = 8;
+const PIN_LOCK_MS = 10 * 60 * 1000;
+
+function getSocketIp(socket) {
+  const forwarded = socket?.handshake?.headers?.['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  return socket?.handshake?.address || 'unknown';
+}
+
+function checkJoinRateLimit(ip) {
+  let bucket = joinBuckets.get(ip);
+  if (!bucket) {
+    bucket = new SearchTokenBucket(30, 30);
+    joinBuckets.set(ip, bucket);
+  }
+  return bucket.tryConsume(1);
+}
+
+function isPinLocked(ip) {
+  const record = pinFailures.get(ip);
+  if (!record) return false;
+  if (record.lockedUntil && record.lockedUntil > Date.now()) return true;
+  if (record.lockedUntil && record.lockedUntil <= Date.now()) {
+    pinFailures.delete(ip);
+  }
+  return false;
+}
+
+function recordPinFailure(ip) {
+  const now = Date.now();
+  let record = pinFailures.get(ip);
+  if (!record || now - record.firstAt > PIN_FAILURE_WINDOW_MS) {
+    record = { count: 0, firstAt: now, lockedUntil: 0 };
+  }
+  record.count += 1;
+  if (record.count >= PIN_MAX_FAILURES) {
+    record.lockedUntil = now + PIN_LOCK_MS;
+  }
+  pinFailures.set(ip, record);
+}
+
+function clearPinFailures(ip) {
+  pinFailures.delete(ip);
+}
+
 // Prune inactive IP buckets every 10 minutes
 setInterval(() => {
   const now = Date.now();
@@ -239,7 +424,50 @@ setInterval(() => {
       searchBuckets.delete(ip);
     }
   }
-}, 10 * 60 * 1000);
+  for (const [ip, bucket] of joinBuckets.entries()) {
+    if (now - bucket.lastFill > 10 * 60 * 1000) {
+      joinBuckets.delete(ip);
+    }
+  }
+  for (const [ip, record] of pinFailures.entries()) {
+    if (now - record.firstAt > PIN_FAILURE_WINDOW_MS && record.lockedUntil <= now) {
+      pinFailures.delete(ip);
+    }
+  }
+}, 10 * 60 * 1000).unref?.();
+
+// --- Admin authentication helpers ---
+function getAdminKey(req) {
+  return req.headers['x-admin-key'] || '';
+}
+
+function adminAuth(req, res, next) {
+  if (!ADMIN_SECRET) {
+    return res.status(503).json({
+      error: 'Admin access is not configured. Set the ADMIN_SECRET environment variable.'
+    });
+  }
+  if (!timingSafeStringEqual(getAdminKey(req), ADMIN_SECRET)) {
+    return res.status(401).json({ error: 'Unauthorized: Invalid Admin Secret' });
+  }
+  next();
+}
+
+function telemetryAuth(req, res, next) {
+  if (!ADMIN_SECRET) {
+    return res.status(503).send('Telemetry is disabled. Set the ADMIN_SECRET environment variable.');
+  }
+  const header = req.headers.authorization || '';
+  if (header.startsWith('Basic ')) {
+    try {
+      const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+      const password = decoded.slice(decoded.indexOf(':') + 1);
+      if (timingSafeStringEqual(password, ADMIN_SECRET)) return next();
+    } catch (e) {}
+  }
+  res.setHeader('WWW-Authenticate', 'Basic realm="JamLock Telemetry", charset="UTF-8"');
+  return res.status(401).send('Authentication required');
+}
 
 // In-Memory Server Response Cache (5-minute TTL)
 const SERVER_SEARCH_CACHE = new Map();
@@ -290,7 +518,13 @@ app.get('/api/search', async (req, res) => {
 
   res.setHeader('X-Cache', 'MISS');
   const startTime = Date.now();
-  const results = await searchSongs(rawQuery);
+  let results;
+  try {
+    results = await searchSongs(rawQuery);
+  } catch (err) {
+    console.error('[SEARCH] Provider error:', err?.message || err);
+    return res.status(502).json({ error: 'Search is temporarily unavailable. Please try again.' });
+  }
   const duration = Date.now() - startTime;
   res.setHeader('X-Response-Time-Ms', duration);
   console.log(`[SEARCH] Query: "${rawQuery}" | Cache: MISS | Time: ${duration}ms | Results: ${results?.length || 0}`);
@@ -315,8 +549,8 @@ app.get('/api/search', async (req, res) => {
 
 // API: Fast Stream Format Warmup (triggered on hover/focus)
 app.get('/api/warmup/:videoId', (req, res) => {
-  const videoId = req.params.videoId;
-  if (videoId) {
+  const videoId = String(req.params.videoId || '').trim();
+  if (/^[\w-]{6,20}$/.test(videoId)) {
     getYoutubeAudioFormat(videoId).catch(() => {});
   }
   res.status(204).end();
@@ -359,21 +593,23 @@ app.get('/api/stream-source', async (req, res) => {
 const MOBILE_TELEMETRY_LOG = [];
 
 // API: Real-Time Mobile Telemetry View (View on your PC while testing on your phone)
-app.get('/api/telemetry', (req, res) => {
+app.get('/api/telemetry', telemetryAuth, (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   const format = req.query.format;
   if (format === 'json') {
     return res.json(MOBILE_TELEMETRY_LOG);
   }
-  // Clean HTML view for easy PC browser viewing
+  // Clean HTML view for easy PC browser viewing. Every field is escaped: these values
+  // originate from unauthenticated socket payloads and must never be treated as markup.
   const rows = MOBILE_TELEMETRY_LOG.slice().reverse().map(item => `
     <tr style="border-bottom: 1px solid #222; font-family: monospace; font-size: 13px;">
-      <td style="padding: 6px 10px; color: #888;">${item.time}</td>
-      <td style="padding: 6px 10px; color: #00e5ff; font-weight: bold;">${item.user || 'anon'}</td>
-      <td style="padding: 6px 10px; color: #ffeb3b; font-weight: bold;">${item.event}</td>
-      <td style="padding: 6px 10px; color: ${item.engine === 'audio' ? '#C8FF3D' : '#ff4081'}; font-weight: bold;">${item.engine}</td>
+      <td style="padding: 6px 10px; color: #888;">${escapeHtml(item.time)}</td>
+      <td style="padding: 6px 10px; color: #00e5ff; font-weight: bold;">${escapeHtml(item.user || 'anon')}</td>
+      <td style="padding: 6px 10px; color: #ffeb3b; font-weight: bold;">${escapeHtml(item.event)}</td>
+      <td style="padding: 6px 10px; color: ${item.engine === 'audio' ? '#C8FF3D' : '#ff4081'}; font-weight: bold;">${escapeHtml(item.engine)}</td>
       <td style="padding: 6px 10px; color: ${item.hidden ? '#ff5252' : '#69f0ae'}; font-weight: bold;">${item.hidden ? 'HIDDEN' : 'VISIBLE'}</td>
-      <td style="padding: 6px 10px; color: #ddd; word-break: break-all;">${item.detail}</td>
+      <td style="padding: 6px 10px; color: #ddd; word-break: break-all;">${escapeHtml(item.detail)}</td>
     </tr>
   `).join('');
 
@@ -408,13 +644,8 @@ app.get('/api/telemetry', (req, res) => {
   `);
 });
 
-// API: Admin Telemetry Stats (Protected with key)
-app.get('/api/admin/stats', (req, res) => {
-  const adminSecret = process.env.ADMIN_SECRET || 'jamlock-secret-admin';
-  const providedKey = req.query.key || req.headers['x-admin-key'];
-  if (!providedKey || providedKey !== adminSecret) {
-    return res.status(401).json({ error: 'Unauthorized: Invalid Admin Secret' });
-  }
+// API: Admin Telemetry Stats (requires ADMIN_SECRET; disabled when unset)
+app.get('/api/admin/stats', adminAuth, (req, res) => {
   const snapshot = metrics.getSnapshot(rooms);
   snapshot.mobileTelemetry = MOBILE_TELEMETRY_LOG.slice(-30);
   return res.json(snapshot);
@@ -425,17 +656,42 @@ io.on('connection', (socket) => {
   let currentRoomId = null;
 
   // Clock sync: client measures RTT against this to compute an accurate offset
-  socket.on('time-ping', (cb) => {
+  safeOn(socket, 'time-ping', (cb) => {
     if (typeof cb === 'function') cb({ serverTime: Date.now() });
   });
 
   // Join or Create Room
-  socket.on('join-room', ({ roomId, username, clientId, isCreating, pin }, callback) => {
+  safeOn(socket, 'join-room', (payload, maybeCallback) => {
+    const callback = typeof maybeCallback === 'function'
+      ? maybeCallback
+      : (typeof payload === 'function' ? payload : null);
+    const data = isPlainObject(payload) ? payload : {};
+    const roomId = typeof data.roomId === 'string' ? data.roomId.trim() : '';
+    const username = typeof data.username === 'string' ? data.username : '';
+    const isCreating = Boolean(data.isCreating);
+    const pin = typeof data.pin === 'string' ? data.pin : '';
+    const ip = getSocketIp(socket);
+
+    if (isPinLocked(ip)) {
+      const message = 'Too many incorrect PIN attempts. Please wait 10 minutes and try again.';
+      if (callback) callback({ success: false, code: 'pin_locked', error: message });
+      socket.emit('join-error', { code: 'pin_locked', message });
+      return;
+    }
+
+    const joinRate = checkJoinRateLimit(ip);
+    if (!joinRate.allowed) {
+      const message = 'Too many join attempts. Please wait a moment and try again.';
+      if (callback) callback({ success: false, code: 'rate_limited', error: message });
+      socket.emit('join-error', { code: 'rate_limited', message });
+      return;
+    }
+
     if (!roomId) {
       if (callback) callback({ success: false, error: 'Room code is required' });
       return;
     }
-    const cleanUsername = (username || '').trim().slice(0, 25);
+    const cleanUsername = username.trim().slice(0, 25);
     if (!cleanUsername) {
       if (callback) {
         callback({ success: false, error: 'Display name is required' });
@@ -462,8 +718,11 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const joinRes = rooms.addUser(cleanId, socket.id, cleanUsername, clientId, pin);
+    const wasExisting = rooms.hasRoom(cleanId);
+    // Identity always comes from the server-verified cookie/session, never from payload.clientId.
+    const joinRes = rooms.addUser(cleanId, socket.id, cleanUsername, socket.data.clientId, pin);
     if (joinRes?.error) {
+      if (joinRes.error === 'invalid_pin') recordPinFailure(ip);
       if (callback) {
         callback({
           success: false,
@@ -479,6 +738,7 @@ io.on('connection', (socket) => {
       });
       return;
     }
+    clearPinFailures(ip);
 
     currentRoomId = cleanId;
     socket.join(cleanId);
@@ -495,8 +755,8 @@ io.on('connection', (socket) => {
     }
 
     // Record Telemetry
-    if (clientId) metrics.recordVisitor(clientId);
-    if (isCreating) metrics.recordRoomCreated();
+    metrics.recordVisitor(socket.data.clientId);
+    if (isCreating && !wasExisting) metrics.recordRoomCreated();
 
     // Notify room of user join only if it's a new human listener
     io.to(cleanId).emit('room-state', rooms.serializeRoom(room));
@@ -534,14 +794,19 @@ io.on('connection', (socket) => {
   };
 
   // Play / Resume
-  socket.on('play', ({ positionSec }) => {
+  safeOn(socket, 'play', (payload) => {
     if (!currentRoomId) return;
     const room = rooms.getRoom(currentRoomId);
     if (!canControlDJ(room, socket.id)) {
       socket.emit('notification', { type: 'error', text: 'DJ controls are restricted to the room host' });
       return;
     }
-    const updated = rooms.setPlaybackState(currentRoomId, true, positionSec);
+    const requestedPos = Number(payload?.positionSec);
+    const updated = rooms.setPlaybackState(
+      currentRoomId,
+      true,
+      Number.isFinite(requestedPos) ? Math.max(0, requestedPos) : undefined
+    );
     if (updated) {
       scheduleAutoAdvance(currentRoomId);
       io.to(currentRoomId).emit('playback-sync', {
@@ -553,14 +818,19 @@ io.on('connection', (socket) => {
   });
 
   // Pause
-  socket.on('pause', ({ positionSec }) => {
+  safeOn(socket, 'pause', (payload) => {
     if (!currentRoomId) return;
     const room = rooms.getRoom(currentRoomId);
     if (!canControlDJ(room, socket.id)) {
       socket.emit('notification', { type: 'error', text: 'DJ controls are restricted to the room host' });
       return;
     }
-    const updated = rooms.setPlaybackState(currentRoomId, false, positionSec);
+    const requestedPos = Number(payload?.positionSec);
+    const updated = rooms.setPlaybackState(
+      currentRoomId,
+      false,
+      Number.isFinite(requestedPos) ? Math.max(0, requestedPos) : undefined
+    );
     if (updated) {
       scheduleAutoAdvance(currentRoomId);
       io.to(currentRoomId).emit('playback-sync', {
@@ -572,14 +842,18 @@ io.on('connection', (socket) => {
   });
 
   // Seek
-  socket.on('seek', ({ positionSec }) => {
+  safeOn(socket, 'seek', (payload) => {
     if (!currentRoomId) return;
     const room = rooms.getRoom(currentRoomId);
     if (!canControlDJ(room, socket.id)) {
       socket.emit('notification', { type: 'error', text: 'DJ controls are restricted to the room host' });
       return;
     }
-    const updated = rooms.seek(currentRoomId, positionSec);
+    const requestedPos = Number(payload?.positionSec);
+    if (!Number.isFinite(requestedPos)) return;
+    const duration = room?.currentTrack?.durationSeconds || 0;
+    const clampedPos = Math.max(0, duration > 0 ? Math.min(requestedPos, duration) : requestedPos);
+    const updated = rooms.seek(currentRoomId, clampedPos);
     if (updated) {
       scheduleAutoAdvance(currentRoomId);
       io.to(currentRoomId).emit('playback-sync', {
@@ -591,7 +865,9 @@ io.on('connection', (socket) => {
   });
 
   // Queue track / Play immediately
-  socket.on('add-to-queue', ({ track, playNext }) => {
+  safeOn(socket, 'add-to-queue', (payload) => {
+    const track = payload?.track;
+    const playNext = Boolean(payload?.playNext);
     if (!currentRoomId || !track) return;
     const room = rooms.getRoom(currentRoomId);
     if (!room) return;
@@ -604,7 +880,11 @@ io.on('connection', (socket) => {
     const cleanTrack = sanitizeTrack(track, queuer?.username);
     if (!cleanTrack) return;
 
-    rooms.addToQueue(currentRoomId, cleanTrack, playNext);
+    const updated = rooms.addToQueue(currentRoomId, cleanTrack, playNext);
+    if (!updated) {
+      socket.emit('notification', { type: 'error', text: 'Queue is full (100 tracks max). Let the music play first!' });
+      return;
+    }
     getYoutubeAudioFormat(cleanTrack.id).catch(() => {});
     scheduleAutoAdvance(currentRoomId);
     io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
@@ -615,7 +895,8 @@ io.on('connection', (socket) => {
   });
 
   // Play immediately (Cover Click / Instant Play)
-  socket.on('play-now', async ({ track }) => {
+  safeOn(socket, 'play-now', async (payload) => {
+    const track = payload?.track;
     if (!currentRoomId || !track) return;
     const room = rooms.getRoom(currentRoomId);
     if (!room) return;
@@ -661,8 +942,10 @@ io.on('connection', (socket) => {
   });
 
   // Remove track from queue
-  socket.on('remove-from-queue', ({ index }) => {
+  safeOn(socket, 'remove-from-queue', (payload) => {
     if (!currentRoomId) return;
+    const index = Number(payload?.index);
+    if (!Number.isInteger(index) || index < 0) return;
     const room = rooms.getRoom(currentRoomId);
     if (!canQueueSong(room, socket.id)) {
       socket.emit('notification', { type: 'error', text: 'Queue editing is restricted to the room host' });
@@ -673,8 +956,8 @@ io.on('connection', (socket) => {
   });
 
   // Update Room Settings (Host Only)
-  socket.on('update-room-settings', (newSettings) => {
-    if (!currentRoomId) return;
+  safeOn(socket, 'update-room-settings', (payload) => {
+    if (!currentRoomId || !isPlainObject(payload)) return;
     const room = rooms.getRoom(currentRoomId);
     const user = room?.users.get(socket.id);
     if (!user?.isHost) {
@@ -682,13 +965,34 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (newSettings) {
-      if (typeof newSettings.pin !== 'undefined') {
-        const cleanPin = newSettings.pin ? String(newSettings.pin).trim().slice(0, 8) : null;
-        room.pin = cleanPin;
-        room.settings.pin = cleanPin;
+    const patch = {};
+    if (typeof payload.djMode !== 'undefined') {
+      patch.djMode = payload.djMode === 'host-only' ? 'host-only' : 'anyone';
+    }
+    if (typeof payload.queueMode !== 'undefined') {
+      patch.queueMode = payload.queueMode === 'host-only' ? 'host-only' : 'anyone';
+    }
+    if (typeof payload.theme !== 'undefined') {
+      const allowedThemes = new Set(['electric', 'cyber', 'sunset', 'midnight']);
+      if (allowedThemes.has(payload.theme)) patch.theme = payload.theme;
+    }
+
+    let pinAction; // undefined = leave unchanged, null = remove, string = set new
+    if (Object.prototype.hasOwnProperty.call(payload, 'pin')) {
+      const rawPin = payload.pin == null ? '' : String(payload.pin).trim();
+      if (!rawPin) {
+        pinAction = null;
+      } else if (/^\d{4,8}$/.test(rawPin)) {
+        pinAction = rawPin;
+      } else {
+        socket.emit('notification', { type: 'error', text: 'Room PIN must be 4–8 digits.' });
+        return;
       }
-      room.settings = { ...room.settings, ...newSettings, pin: room.pin };
+    }
+
+    Object.assign(room.settings, patch);
+    if (pinAction !== undefined) {
+      rooms.setRoomPin(currentRoomId, pinAction);
     }
     io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
     io.to(currentRoomId).emit('notification', {
@@ -698,7 +1002,7 @@ io.on('connection', (socket) => {
   });
 
   // Skip Current Track (manual skip or client-reported track end)
-  socket.on('skip-track', async (payload) => {
+  safeOn(socket, 'skip-track', async (payload) => {
     if (!currentRoomId) return;
     const room = rooms.getRoom(currentRoomId);
     if (!room) return;
@@ -714,7 +1018,7 @@ io.on('connection', (socket) => {
   });
 
   // Democratic Skip Voting (for guests and members)
-  socket.on('vote-skip', async () => {
+  safeOn(socket, 'vote-skip', async () => {
     if (!currentRoomId) return;
     const room = rooms.getRoom(currentRoomId);
     if (!room || !room.currentTrack) return;
@@ -744,43 +1048,58 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Toggle Auto-Suggest Setting
-  socket.on('toggle-auto-suggest', ({ enabled }) => {
-    if (!currentRoomId) return;
+  // Toggle Auto-Suggest Setting (host-only; this is a room-wide playback setting)
+  safeOn(socket, 'toggle-auto-suggest', (payload) => {
+    if (!currentRoomId || !isPlainObject(payload)) return;
     const room = rooms.getRoom(currentRoomId);
-    if (room) {
-      room.settings.autoSuggest = Boolean(enabled);
-      if (!room.settings.autoSuggest) {
-        if (room.autoSuggestTimer) {
-          clearTimeout(room.autoSuggestTimer);
-          room.autoSuggestTimer = null;
-        }
-        rooms.evictAutoSuggestedTracks(currentRoomId);
-      } else {
-        scheduleAutoAdvance(currentRoomId);
-      }
-      io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
-      io.to(currentRoomId).emit('notification', {
-        type: 'info',
-        text: `Auto-Suggest ${enabled ? 'enabled' : 'disabled'}`
-      });
+    if (!room) return;
+    const user = room.users.get(socket.id);
+    if (!user?.isHost) {
+      socket.emit('notification', { type: 'error', text: 'Only the host can change auto-suggest' });
+      return;
     }
+
+    const enabled = Boolean(payload.enabled);
+    room.settings.autoSuggest = enabled;
+    if (!enabled) {
+      if (room.autoSuggestTimer) {
+        clearTimeout(room.autoSuggestTimer);
+        room.autoSuggestTimer = null;
+      }
+      rooms.evictAutoSuggestedTracks(currentRoomId);
+    } else {
+      scheduleAutoAdvance(currentRoomId);
+    }
+    io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
+    io.to(currentRoomId).emit('notification', {
+      type: 'info',
+      text: `Auto-Suggest ${enabled ? 'enabled' : 'disabled'}`
+    });
   });
 
   // Mobile Client Audio Telemetry for live background debugging
-  socket.on('client-audio-telemetry', (data) => {
-    if (!data) return;
+  safeOn(socket, 'client-audio-telemetry', (data) => {
+    if (!isPlainObject(data)) return;
     const room = currentRoomId ? rooms.getRoom(currentRoomId) : null;
     const user = room?.users.get(socket.id);
-    const username = user?.username || data.username || 'Mobile Guest';
+    const username = cleanText(user?.username || data.username || 'Mobile Guest', 25);
     const timeStr = new Date().toISOString().slice(11, 23);
-    const detailStr = typeof data.detail === 'object' ? JSON.stringify(data.detail) : String(data.detail || '');
+    let detailStr = '';
+    if (isPlainObject(data.detail) || Array.isArray(data.detail)) {
+      try {
+        detailStr = JSON.stringify(data.detail).slice(0, 1000);
+      } catch (e) {
+        detailStr = '';
+      }
+    } else {
+      detailStr = cleanText(data.detail || '', 1000);
+    }
 
     const record = {
       time: timeStr,
       user: username,
-      event: data.event || 'unknown',
-      engine: data.engine || 'unknown',
+      event: cleanText(data.event || 'unknown', 60),
+      engine: cleanText(data.engine || 'unknown', 20),
       hidden: Boolean(data.hidden),
       detail: detailStr,
       state: data.state || null
@@ -791,14 +1110,15 @@ io.on('connection', (socket) => {
 
     // Pretty terminal log with distinct emoji colors
     console.log(
-      `📱 [MOBILE TELEMETRY] ${timeStr} | ${username} | event=${data.event} | engine=${data.engine} | hidden=${data.hidden} | ${detailStr}`
+      `📱 [MOBILE TELEMETRY] ${timeStr} | ${username} | event=${record.event} | engine=${record.engine} | hidden=${record.hidden} | ${detailStr}`
     );
   });
 
   // Realtime Live Reactions with rate limiting (max 5 per 2 seconds per socket)
   const reactionTimestamps = [];
-  socket.on('send-reaction', ({ emoji }) => {
-    if (!currentRoomId) return;
+  const ALLOWED_REACTIONS = new Set(['🔥', '❤️', '⚡', '✨']);
+  safeOn(socket, 'send-reaction', (payload) => {
+    if (!currentRoomId || !isPlainObject(payload)) return;
 
     const now = Date.now();
     // Keep only timestamps from the last 2000ms
@@ -817,7 +1137,7 @@ io.on('connection', (socket) => {
     const user = room?.users.get(socket.id);
     const pos = rooms.getCurrentPosition(room);
     const reactionData = {
-      emoji: emoji || '🔥',
+      emoji: ALLOWED_REACTIONS.has(payload.emoji) ? payload.emoji : '🔥',
       username: user?.username || 'Guest',
       color: user?.avatarColor || '#ec4899',
       positionSec: Number(pos.toFixed(1)),
@@ -829,7 +1149,7 @@ io.on('connection', (socket) => {
   });
 
   // Auto-Queue 3 Similar Tracks
-  socket.on('queue-similar-tracks', async () => {
+  safeOn(socket, 'queue-similar-tracks', async () => {
     if (!currentRoomId) return;
     const room = rooms.getRoom(currentRoomId);
     if (!room || !room.currentTrack) {
@@ -860,17 +1180,23 @@ io.on('connection', (socket) => {
       const user = room.users.get(socket.id);
       const addedBy = user?.username || 'Auto-Suggest';
 
+      let addedCount = 0;
       for (const t of freshTracks) {
-        room.queue.push({
-          ...t,
-          addedBy
-        });
+        const clean = sanitizeTrack(t, addedBy);
+        if (!clean) continue;
+        if (!rooms.addToQueue(currentRoomId, clean, false)) break;
+        addedCount++;
+      }
+
+      if (addedCount === 0) {
+        socket.emit('notification', { type: 'info', text: 'Queue is full (100 tracks max). Let the music play first!' });
+        return;
       }
 
       io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
       io.to(currentRoomId).emit('notification', {
         type: 'success',
-        text: `✨ Added ${freshTracks.length} tracks similar to "${current.title}"`
+        text: `✨ Added ${addedCount} track${addedCount === 1 ? '' : 's'} similar to "${current.title}"`
       });
     } catch (err) {
       console.error('[SimilarTracks] Error finding similar tracks:', err);
@@ -878,8 +1204,10 @@ io.on('connection', (socket) => {
   });
 
   // In-room Chat Message
-  socket.on('chat-message', ({ text }) => {
-    if (!currentRoomId || !text) return;
+  safeOn(socket, 'chat-message', (payload) => {
+    if (!currentRoomId || !isPlainObject(payload) || typeof payload.text !== 'string') return;
+    const text = cleanText(payload.text, 300);
+    if (!text) return;
     const room = rooms.getRoom(currentRoomId);
     const user = room?.users.get(socket.id);
     if (!user) return;
@@ -891,8 +1219,9 @@ io.on('connection', (socket) => {
   });
 
   // Host Kick / Eviction Moderation
-  socket.on('kick-user', ({ targetClientId }) => {
-    if (!currentRoomId || !targetClientId) return;
+  safeOn(socket, 'kick-user', (payload) => {
+    const targetClientId = payload?.targetClientId;
+    if (!currentRoomId || typeof targetClientId !== 'string' || targetClientId.length > 64) return;
     const kickResult = rooms.kickUser(currentRoomId, socket.id, targetClientId);
     if (!kickResult) return;
 
@@ -913,7 +1242,10 @@ io.on('connection', (socket) => {
   });
 
   // In-Room Username Rename
-  socket.on('change-username', ({ newUsername }) => {
+  safeOn(socket, 'change-username', (payload) => {
+    const newUsername = typeof payload?.newUsername === 'string'
+      ? cleanText(payload.newUsername, 25)
+      : '';
     if (!currentRoomId || !newUsername) return;
     const res = rooms.changeUsername(currentRoomId, socket.id, newUsername);
     if (!res || res.error) {
@@ -935,7 +1267,7 @@ io.on('connection', (socket) => {
   });
 
   // Request sync timestamp
-  socket.on('sync-request', async (callback) => {
+  safeOn(socket, 'sync-request', async (callback) => {
     if (!currentRoomId) return;
     const room = rooms.getRoom(currentRoomId);
     if (!room) return;
@@ -983,8 +1315,8 @@ io.on('connection', (socket) => {
     }
   };
 
-  socket.on('leave-room', handleLeave);
-  socket.on('disconnect', handleLeave);
+  safeOn(socket, 'leave-room', handleLeave);
+  safeOn(socket, 'disconnect', handleLeave);
 });
 
 // Health check & Free Tier Keep-Alive Endpoint
@@ -1013,19 +1345,24 @@ app.get('/r/:roomId', (req, res) => {
     let html = fs.readFileSync(indexPath, 'utf-8');
     const room = rooms.getRoom(roomId);
 
-    let title = `Join Room ${roomId} on JamLock`;
+    const safeRoomId = escapeHtml(roomId);
+    let title = `Join Room ${safeRoomId} on JamLock`;
     let desc = `Listen to music together in real-time. Zero logins, zero setup.`;
     let image = 'https://jamlock.onrender.com/browser_header.webp';
 
     if (room && room.currentTrack) {
-      title = `▶ ${room.currentTrack.cleanTitle || room.currentTrack.title} — ${room.currentTrack.artist}`;
-      desc = `Currently playing in JamLock Room ${roomId} with ${room.users?.size || 1} listener${room.users?.size === 1 ? '' : 's'}. Join in!`;
-      if (room.currentTrack.thumbnail) {
+      const trackTitle = escapeHtml(room.currentTrack.cleanTitle || room.currentTrack.title || 'Untitled Track');
+      const artist = escapeHtml(room.currentTrack.artist || 'Unknown Artist');
+      title = `▶ ${trackTitle} — ${artist}`;
+      const listenerCount = room.users?.size || 1;
+      desc = `Currently playing in JamLock Room ${safeRoomId} with ${listenerCount} listener${listenerCount === 1 ? '' : 's'}. Join in!`;
+      if (room.currentTrack.thumbnail && /^https:\/\/[^'"\s<>()]{1,300}$/.test(room.currentTrack.thumbnail)) {
         image = room.currentTrack.thumbnail;
       }
     }
 
-    const roomUrl = `https://jamlock.onrender.com/r/${roomId}`;
+    const safeImage = escapeHtml(image);
+    const roomUrl = `https://jamlock.onrender.com/r/${encodeURIComponent(roomId)}`;
     const ogType = (room && room.currentTrack) ? 'music.song' : 'website';
 
     html = html.replace(/<title>.*?<\/title>/, `<title>${title} | JamLock</title>`);
@@ -1033,11 +1370,11 @@ app.get('/r/:roomId', (req, res) => {
     html = html.replace(/<meta property="og:url" content=".*?">/, `<meta property="og:url" content="${roomUrl}">`);
     html = html.replace(/<meta property="og:title" content=".*?">/, `<meta property="og:title" content="${title}">`);
     html = html.replace(/<meta property="og:description" content=".*?">/, `<meta property="og:description" content="${desc}">`);
-    html = html.replace(/<meta property="og:image" content=".*?">/, `<meta property="og:image" content="${image}">`);
+    html = html.replace(/<meta property="og:image" content=".*?">/, `<meta property="og:image" content="${safeImage}">`);
     html = html.replace(/<meta name="twitter:url" content=".*?">/, `<meta name="twitter:url" content="${roomUrl}">`);
     html = html.replace(/<meta name="twitter:title" content=".*?">/, `<meta name="twitter:title" content="${title}">`);
     html = html.replace(/<meta name="twitter:description" content=".*?">/, `<meta name="twitter:description" content="${desc}">`);
-    html = html.replace(/<meta name="twitter:image" content=".*?">/, `<meta name="twitter:image" content="${image}">`);
+    html = html.replace(/<meta name="twitter:image" content=".*?">/, `<meta name="twitter:image" content="${safeImage}">`);
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.send(html);

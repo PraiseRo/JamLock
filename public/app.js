@@ -424,55 +424,68 @@ function initWavyBar() {
   waveActivePath.setAttribute('d', pathData);
 
   // Seeking via pointer events (mouse click/drag, mobile touch tap/drag)
-  const seekFromPointer = (e) => {
+  // Optimistically updates the UI while dragging; emits a single network 'seek' on release
+  let pendingSeekSec = null;
+  const updateScrubUI = (e) => {
     if (!currentRoom?.currentTrack) return;
     const rect = wavyContainer.getBoundingClientRect();
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clickX = clientX - rect.left;
     const pct = Math.max(0, Math.min(1, clickX / rect.width));
-    const newPositionSec = pct * (currentRoom.currentTrack.durationSeconds || 100);
-    
-    // Immediate optimistic UI update
+    pendingSeekSec = pct * (currentRoom.currentTrack.durationSeconds || 100);
     updateWaveformProgress(pct * 100);
-    socket.emit('seek', { positionSec: newPositionSec });
+    if (currentTimeDisplay) currentTimeDisplay.textContent = formatTime(pendingSeekSec);
+  };
+
+  const commitSeek = () => {
+    if (pendingSeekSec != null) {
+      socket.emit('seek', { positionSec: pendingSeekSec });
+      pendingSeekSec = null;
+    }
   };
 
   wavyContainer.addEventListener('mousedown', (e) => {
     isScrubbingWave = true;
+    isSeeking = true;
     wavyContainer.classList.add('is-dragging');
-    seekFromPointer(e);
+    updateScrubUI(e);
   });
 
   window.addEventListener('mousemove', (e) => {
     if (isScrubbingWave) {
-      seekFromPointer(e);
+      updateScrubUI(e);
     }
   });
 
   window.addEventListener('mouseup', () => {
     if (isScrubbingWave) {
       isScrubbingWave = false;
+      isSeeking = false;
       wavyContainer.classList.remove('is-dragging');
+      commitSeek();
     }
   });
 
   // Touch support for Mobile
   wavyContainer.addEventListener('touchstart', (e) => {
     isScrubbingWave = true;
+    isSeeking = true;
     wavyContainer.classList.add('is-dragging');
-    seekFromPointer(e);
+    updateScrubUI(e);
   }, { passive: true });
 
   window.addEventListener('touchmove', (e) => {
     if (isScrubbingWave && e.touches) {
-      seekFromPointer(e);
+      updateScrubUI(e);
     }
   }, { passive: true });
 
   window.addEventListener('touchend', () => {
     if (isScrubbingWave) {
       isScrubbingWave = false;
+      isSeeking = false;
       wavyContainer.classList.remove('is-dragging');
+      commitSeek();
     }
   });
 }
@@ -882,7 +895,8 @@ cancelLeaveBtn?.addEventListener('click', () => {
   leaveConfirmModal?.classList.add('hidden');
 });
 
-confirmLeaveBtn?.addEventListener('click', () => {
+// Unified leave room handler (used by confirm button, kick event, and room-not-found)
+function leaveRoom() {
   try {
     socket.emit('leave-room');
   } catch (e) {}
@@ -896,6 +910,11 @@ confirmLeaveBtn?.addEventListener('click', () => {
   // Clean URL history to root so reloading or back button never re-joins
   window.history.replaceState({}, '', '/');
   window.location.href = window.location.origin + '/';
+}
+window.leaveRoom = leaveRoom;
+
+confirmLeaveBtn?.addEventListener('click', () => {
+  leaveRoom();
 });
 
 // Instant departure notification if user closes or navigates away

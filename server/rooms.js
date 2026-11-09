@@ -1,4 +1,8 @@
 // In-Memory Room Management & Realtime Sync Engine
+import crypto from 'crypto';
+
+const MAX_QUEUE_LENGTH = 100;
+const MAX_USERS_PER_ROOM = 50;
 
 class RoomManager {
   constructor() {
@@ -51,13 +55,16 @@ class RoomManager {
         chat: [], // Last 50 messages: { id, user, text, timestamp }
         trackReactions: [], // Pinned timeline reactions for current track: { id, emoji, positionSec, username, color }
         skipVotes: new Set(), // Set of clientIds who voted to skip current track
-        pin: null, // Optional room access PIN
+        // Room access PIN is stored only as a salted scrypt hash; the plaintext is never kept
+        // or serialized. hasPin tells clients whether to show the PIN prompt.
+        hasPin: false,
+        pinSalt: null,
+        pinHash: null,
         settings: {
           djMode: 'anyone', // 'anyone' | 'host-only'
           queueMode: 'anyone', // 'anyone' | 'host-only'
           autoSuggest: true, // Automatic smart recommendation when queue ends
-          theme: 'electric', // 'electric' | 'cyber' | 'sunset' | 'midnight'
-          pin: null
+          theme: 'electric' // 'electric' | 'cyber' | 'sunset' | 'midnight'
         }
       });
     }
@@ -74,6 +81,38 @@ class RoomManager {
     return this.rooms.has(roomId.trim().toUpperCase());
   }
 
+  setRoomPin(roomId, pin) {
+    const room = this.getRoom(roomId);
+    if (!room) return null;
+
+    const normalized = pin == null ? '' : String(pin).trim();
+    if (!normalized) {
+      room.hasPin = false;
+      room.pinSalt = null;
+      room.pinHash = null;
+      return room;
+    }
+
+    if (!/^\d{4,8}$/.test(normalized)) return null;
+    const salt = crypto.randomBytes(16);
+    room.pinSalt = salt.toString('hex');
+    room.pinHash = crypto.scryptSync(normalized, salt, 32).toString('hex');
+    room.hasPin = true;
+    return room;
+  }
+
+  verifyRoomPin(room, providedPin) {
+    if (!room?.hasPin) return true;
+    if (!room.pinHash || !room.pinSalt) return false;
+
+    const candidate = String(providedPin ?? '').trim().slice(0, 8);
+    if (!/^\d{4,8}$/.test(candidate)) return false;
+
+    const expected = Buffer.from(room.pinHash, 'hex');
+    const actual = crypto.scryptSync(candidate, Buffer.from(room.pinSalt, 'hex'), expected.length);
+    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  }
+
   addUser(roomId, socketId, username, clientId, providedPin) {
     const room = this.getOrCreateRoom(roomId);
     room.emptySince = null;
@@ -81,7 +120,7 @@ class RoomManager {
     const isFirstUser = room.users.size === 0;
 
     // Verify room PIN if room is private and requester is not already recognized
-    if (room.pin && !isFirstUser) {
+    if (room.hasPin && !isFirstUser) {
       let isExistingRecognizedUser = false;
       for (const u of room.users.values()) {
         if (u.clientId === resolvedClientId) {
@@ -89,7 +128,7 @@ class RoomManager {
           break;
         }
       }
-      if (!isExistingRecognizedUser && String(providedPin || '').trim() !== String(room.pin).trim()) {
+      if (!isExistingRecognizedUser && !this.verifyRoomPin(room, providedPin)) {
         return { error: 'invalid_pin', message: 'This room is private. Incorrect or missing PIN.' };
       }
     }
@@ -111,6 +150,10 @@ class RoomManager {
       // Map socketId back to the same user
       room.users.set(socketId, existingUser);
       return { room, user: existingUser, isNewUser: false };
+    }
+
+    if (this.getUniqueUsers(room).length >= MAX_USERS_PER_ROOM) {
+      return { error: 'room_full', message: `This room is full (${MAX_USERS_PER_ROOM} listeners max).` };
     }
 
     // Generate distinctive avatar color for brand-new human
@@ -197,9 +240,19 @@ class RoomManager {
           }
         }
 
-        // Clean up empty rooms after 10 minutes
+        // Clean up empty rooms after 10 minutes. Stop playback/timers immediately so an
+        // abandoned room does not keep resolving recommendations in the background.
         if (room.users.size === 0) {
           room.emptySince = Date.now();
+          if (room.autoAdvanceTimer) {
+            clearTimeout(room.autoAdvanceTimer);
+            room.autoAdvanceTimer = null;
+          }
+          if (room.autoSuggestTimer) {
+            clearTimeout(room.autoSuggestTimer);
+            room.autoSuggestTimer = null;
+          }
+          room.playback = { isPlaying: false, positionSec: room.playback?.positionSec || 0, updatedAt: Date.now() };
           setTimeout(() => {
             if (room.users.size === 0) {
               this.rooms.delete(roomId);
@@ -290,6 +343,8 @@ class RoomManager {
     if (!room.currentTrack) {
       return this.playTrack(roomId, track);
     }
+
+    if (room.queue.length >= MAX_QUEUE_LENGTH) return null;
 
     if (playNext) {
       room.queue.unshift(track);
@@ -454,8 +509,7 @@ class RoomManager {
       },
       settings: {
         ...room.settings,
-        hasPin: Boolean(room.pin),
-        pin: room.pin || null
+        hasPin: Boolean(room.hasPin)
       },
       chat: (room.chat || []).slice(-50),
       trackReactions: room.trackReactions || [],
