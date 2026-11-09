@@ -1,5 +1,5 @@
 // JamLock Production Service Worker (App Shell & Cold-Start Accelerator)
-const CACHE_NAME = 'jamlock-v12';
+const CACHE_NAME = 'jamlock-v13';
 const PRECACHE_ASSETS = [
   '/',
   '/style.css',
