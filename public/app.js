@@ -97,6 +97,8 @@ let loadedTrackId = null;       // track id currently loaded in the YT player
 let lastPlaybackKey = '';       // trackId:isPlaying last applied from room-state
 let lastPlayKick = 0;           // throttle for retrying playVideo()
 let notPlayingSince = 0;        // when the player first failed to play while room is playing
+let localPauseIntentUntil = 0;  // ignore OS/browser pause-then-resume blips right after a user pause
+const failedEnginesByTrack = new Map(); // trackId -> Set('audio'|'yt') for fallback logic
 
 let clockSynced = false;         // true once a measured (RTT-compensated) offset exists
 let lastRtt = 0;                 // RTT of the best clock-sync sample (debug)
@@ -312,6 +314,9 @@ const settingDjMode = document.getElementById('setting-dj-mode');
 const settingQueueMode = document.getElementById('setting-queue-mode');
 const settingTheme = document.getElementById('setting-theme');
 const settingRoomPin = document.getElementById('setting-room-pin');
+const settingRoomPinRemove = document.getElementById('setting-room-pin-remove');
+const roomPinRemoveRow = document.getElementById('room-pin-remove-row');
+const roomPinStatus = document.getElementById('room-pin-status');
 const leaveConfirmModal = document.getElementById('leave-confirm-modal');
 const cancelLeaveBtn = document.getElementById('cancel-leave-btn');
 const confirmLeaveBtn = document.getElementById('confirm-leave-btn');
@@ -543,10 +548,13 @@ const isMobileClient = /mobile|android|iphone|ipad|ipod/i.test(navigator.userAge
 const isCloudHosted = window.location.hostname.includes('render.com') || window.location.hostname.includes('koyeb') || window.location.hostname.includes('railway');
 let activeEngine = (isCloudHosted && !isMobileClient) ? 'yt' : 'audio'; // 'audio' (native HTML5 <audio>) | 'yt' (YouTube IFrame)
 let currentVolume = parseInt(localStorage.getItem('jamlock_volume') || localStorage.getItem('beatsync_volume') || '100', 10);
-let isMuted = false;
+if (!Number.isFinite(currentVolume)) currentVolume = 100;
+currentVolume = Math.max(0, Math.min(100, currentVolume));
+let isMuted = localStorage.getItem('jamlock_muted') === '1';
 
 if (nativeAudio) {
   nativeAudio.volume = Math.max(0, Math.min(1, currentVolume / 100));
+  nativeAudio.muted = isMuted;
 }
 
 if (volumeSlider) {
@@ -555,6 +563,7 @@ if (volumeSlider) {
     currentVolume = parseInt(e.target.value, 10);
     localStorage.setItem('jamlock_volume', currentVolume);
     isMuted = false;
+    try { localStorage.setItem('jamlock_muted', '0'); } catch (e) {}
     updateVolumeUI();
     if (nativeAudio) {
       nativeAudio.muted = false;
@@ -570,6 +579,7 @@ if (volumeSlider) {
 if (muteBtn) {
   muteBtn.addEventListener('click', () => {
     isMuted = !isMuted;
+    try { localStorage.setItem('jamlock_muted', isMuted ? '1' : '0'); } catch (e) {}
     if (nativeAudio) {
       nativeAudio.muted = isMuted;
       if (!isMuted) nativeAudio.volume = Math.max(0, Math.min(1, currentVolume / 100));
@@ -605,6 +615,10 @@ try {
 if (autoSuggestSwitchBtn) {
   autoSuggestSwitchBtn.setAttribute('aria-checked', autoSuggestEnabled ? 'true' : 'false');
   autoSuggestSwitchBtn.addEventListener('click', () => {
+    if (!currentUser?.isHost) {
+      showToast('Only the room host can change auto-suggest', 'info');
+      return;
+    }
     autoSuggestEnabled = !autoSuggestEnabled;
     syncAutoSuggestUI(autoSuggestEnabled);
     socket.emit('toggle-auto-suggest', { enabled: autoSuggestEnabled });
@@ -618,6 +632,10 @@ function syncAutoSuggestUI(enabled) {
   } catch (e) {}
   if (!autoSuggestSwitchBtn) return;
   autoSuggestSwitchBtn.setAttribute('aria-checked', autoSuggestEnabled ? 'true' : 'false');
+  const canToggle = Boolean(currentUser?.isHost);
+  autoSuggestSwitchBtn.disabled = !canToggle;
+  autoSuggestSwitchBtn.setAttribute('aria-disabled', canToggle ? 'false' : 'true');
+  autoSuggestSwitchBtn.title = canToggle ? 'Toggle auto-suggest' : 'Only the host can change auto-suggest';
 }
 
 // --- 4. ROOM RESTORATION & NAVIGATION ---
@@ -1045,11 +1063,26 @@ hostSettingsBtn?.addEventListener('click', () => {
     const djVal = currentRoom.settings.djMode || 'anyone';
     const queueVal = currentRoom.settings.queueMode || 'anyone';
     const themeVal = currentRoom.settings.theme || 'electric';
+    const hasPin = Boolean(currentRoom.settings.hasPin);
 
     if (settingDjMode) settingDjMode.value = djVal;
     if (settingQueueMode) settingQueueMode.value = queueVal;
     if (settingTheme) settingTheme.value = themeVal;
-    if (settingRoomPin) settingRoomPin.value = currentRoom.settings.pin || '';
+    if (settingRoomPin) {
+      settingRoomPin.value = '';
+      settingRoomPin.disabled = false;
+      settingRoomPin.placeholder = hasPin ? 'Enter a new PIN to replace it' : 'Optional: 4–8 digits';
+    }
+    if (settingRoomPinRemove) {
+      settingRoomPinRemove.checked = false;
+      settingRoomPinRemove.disabled = false;
+    }
+    roomPinRemoveRow?.classList.toggle('hidden', !hasPin);
+    if (roomPinStatus) {
+      roomPinStatus.textContent = hasPin
+        ? 'This room currently requires a PIN. Leave the field blank to keep it.'
+        : 'No PIN set — anyone with the room code can join.';
+    }
 
     syncCustomDropdown('wrap-setting-dj-mode', djVal);
     syncCustomDropdown('wrap-setting-queue-mode', queueVal);
@@ -1059,6 +1092,14 @@ hostSettingsBtn?.addEventListener('click', () => {
   settingsModal?.classList.remove('hidden');
 });
 
+settingRoomPinRemove?.addEventListener('change', () => {
+  const removing = Boolean(settingRoomPinRemove.checked);
+  if (settingRoomPin) {
+    settingRoomPin.disabled = removing;
+    if (removing) settingRoomPin.value = '';
+  }
+});
+
 closeSettingsModalBtn?.addEventListener('click', () => {
   closeAllCustomDropdowns();
   settingsModal?.classList.add('hidden');
@@ -1066,12 +1107,24 @@ closeSettingsModalBtn?.addEventListener('click', () => {
 
 saveSettingsBtn?.addEventListener('click', () => {
   closeAllCustomDropdowns();
-  socket.emit('update-room-settings', {
+  const payload = {
     djMode: settingDjMode?.value || 'anyone',
     queueMode: settingQueueMode?.value || 'anyone',
-    theme: settingTheme?.value || 'electric',
-    pin: settingRoomPin ? settingRoomPin.value.trim() : null
-  });
+    theme: settingTheme?.value || 'electric'
+  };
+
+  const newPin = settingRoomPin ? settingRoomPin.value.trim() : '';
+  if (settingRoomPinRemove?.checked) {
+    payload.pin = null;
+  } else if (newPin) {
+    if (!/^\d{4,8}$/.test(newPin)) {
+      showToast('Room PIN must be 4–8 digits.', 'error');
+      return;
+    }
+    payload.pin = newPin;
+  }
+
+  socket.emit('update-room-settings', payload);
   settingsModal?.classList.add('hidden');
 });
 
@@ -1147,6 +1200,7 @@ function setupMediaSessionHandlers() {
   });
   safeSet('pause', () => {
     if (!currentRoom?.currentTrack) return;
+    localPauseIntentUntil = Date.now() + 2500;
     if (activeEngine === 'audio' && nativeAudio && !nativeAudio.paused) {
       nativeAudio.pause();
     } else if (activeEngine === 'yt' && ytReady && ytPlayer) {
@@ -1350,6 +1404,14 @@ function armNativeStallWatchdog() {
 
     audioLog('watchdog: STALLED, no data received -> falling back to YouTube', nativeAudioSnapshot());
     nativeAudioFailed = true;
+    const stalledTrackId = currentRoom.currentTrack.id;
+    const failed = markEngineFailure(stalledTrackId, 'audio');
+    if (failed.has('yt')) {
+      // YouTube already failed for this song and the native retry stalled. Retrying
+      // either engine would loop, so ask the room to move on instead.
+      requestUnplayableTrackSkip(currentRoom, stalledTrackId);
+      return;
+    }
     fallbackToYouTubeTrack(currentRoom, 'stall-watchdog');
   }, NATIVE_STALL_MS);
 }
@@ -1408,12 +1470,17 @@ if (nativeAudio) {
     if (mediaErr?.code === 1) return;
 
     const currentTrackId = currentRoom.currentTrack.id;
+    const errToken = loadRequestToken;
 
     // On mobile: if server proxy /api/audio/ failed (e.g. Render datacenter IP blocked), attempt client direct stream
     if (isMobileClient && nativeAudio.src && nativeAudio.src.includes('/api/audio/')) {
       audioLog('audio: server proxy error, attempting client-side direct stream bypass...');
       const directUrl = await resolveClientSideStream(currentTrackId);
-      if (directUrl && currentRoom?.currentTrack?.id === currentTrackId) {
+      if (
+        directUrl &&
+        errToken === loadRequestToken &&
+        currentRoom?.currentTrack?.id === currentTrackId
+      ) {
         audioLog('audio: revived via client-side direct stream!', { directUrl: directUrl.substring(0, 45) });
         nativeAudio.src = directUrl;
         const livePos = Math.max(0, calculateServerPosition());
@@ -1428,14 +1495,22 @@ if (nativeAudio) {
       }
     }
 
+    if (errToken !== loadRequestToken || currentRoom?.currentTrack?.id !== currentTrackId) return;
+
     audioLog('audio:ERROR', {
       code: mediaErr?.code,
       label: labels[mediaErr?.code] || 'unknown',
       message: mediaErr?.message,
       ...nativeAudioSnapshot()
     });
-    probeAudioEndpoint(currentRoom.currentTrack.id);
+    probeAudioEndpoint(currentTrackId);
     nativeAudioFailed = true;
+    const failed = markEngineFailure(currentTrackId, 'audio');
+    if (failed.has('yt')) {
+      // The iframe already failed for this song, so retrying it would loop. Skip instead.
+      requestUnplayableTrackSkip(currentRoom, currentTrackId);
+      return;
+    }
     fallbackToYouTubeTrack(currentRoom, 'native-audio-error');
   });
 
@@ -1444,7 +1519,7 @@ if (nativeAudio) {
   nativeAudio.addEventListener('pause', () => {
     if (activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
     if (nativeAudio.src === SILENT_WAV_DATA_URI) return;
-    if (currentRoom.playback?.isPlaying && !nativeAudio.ended) {
+    if (currentRoom.playback?.isPlaying && !nativeAudio.ended && Date.now() > localPauseIntentUntil) {
       [80, 350].forEach((delayMs) => {
         setTimeout(() => {
           if (
@@ -1519,7 +1594,27 @@ window.onYouTubeIframeAPIReady = () => {
           101: 'embedding disabled by owner',
           150: 'embedding disabled by owner'
         };
+        let erroredVideoId = '';
+        try { erroredVideoId = ytPlayer?.getVideoData?.()?.video_id || ''; } catch (e) {}
+        const activeTrackId = currentRoom?.currentTrack?.id;
+        if (erroredVideoId && activeTrackId && erroredVideoId !== activeTrackId) {
+          audioLog('yt:ERROR-stale', { code: event.data, erroredVideoId, activeTrackId });
+          return;
+        }
         audioLog('yt:ERROR', { code: event.data, meaning: meanings[event.data] || 'unknown', activeEngine });
+        if (activeEngine !== 'yt' || !activeTrackId) return;
+
+        const failed = markEngineFailure(activeTrackId, 'yt');
+        if (!failed.has('audio') && nativeAudio) {
+          // Embed-blocked or region-blocked video: try the server-proxied native stream
+          // before giving up, since it does not depend on YouTube's embed permissions.
+          showToast('YouTube playback failed. Trying the direct audio stream…', 'info');
+          nativeAudioFailed = false;
+          loadedTrackId = null;
+          loadCurrentTrack(currentRoom, { forceNative: true, reload: true });
+          return;
+        }
+        requestUnplayableTrackSkip(currentRoom, activeTrackId);
       },
       onStateChange: (event) => {
         if (activeEngine !== 'yt') return;
@@ -1578,11 +1673,12 @@ function startSyncEngine() {
     const roomPlaying = currentRoom.playback.isPlaying;
 
     // Track-End Boundary Protection: never kick audio.play() or driftSeek() past track finish
-    const isAtOrPastEnd = effectiveTime >= duration - 0.4 || (activeEngine === 'audio' && nativeAudio?.ended);
+    const isAtOrPastEnd = effectiveTime >= duration - 0.15 || (activeEngine === 'audio' && nativeAudio?.ended);
     if (isAtOrPastEnd) {
       if (activeEngine === 'audio' && nativeAudio && !nativeAudio.paused) {
         try { nativeAudio.pause(); } catch (e) {}
       }
+      if (nativeAudio) nativeAudio.playbackRate = 1;
       currentTimeDisplay.textContent = formatTime(duration);
       updateWaveformProgress(100);
 
@@ -1604,7 +1700,17 @@ function startSyncEngine() {
 
       if (roomPlaying) {
         if (isPlayingAudio) {
-          if (Math.abs(local - effectiveTime) > DRIFT_HARD_SEEK_SEC) driftSeek(effectiveTime);
+          const drift = local - effectiveTime;
+          const absDrift = Math.abs(drift);
+          if (absDrift > DRIFT_HARD_SEEK_SEC) {
+            nativeAudio.playbackRate = 1;
+            driftSeek(effectiveTime);
+          } else if (absDrift > 0.15) {
+            // Gentle catch-up: an inaudible rate nudge avoids seek pops on small drift
+            nativeAudio.playbackRate = drift > 0 ? 0.98 : 1.02;
+          } else if (nativeAudio.playbackRate !== 1) {
+            nativeAudio.playbackRate = 1;
+          }
           notPlayingSince = 0;
           showAudioPrompt(false);
         } else if (!isBufferingAudio && Date.now() - lastPlayKick > 2200) {
@@ -1620,6 +1726,7 @@ function startSyncEngine() {
         if (!nativeAudio.paused) {
           try { nativeAudio.pause(); } catch (e) {}
         }
+        if (nativeAudio.playbackRate !== 1) nativeAudio.playbackRate = 1;
         notPlayingSince = 0;
         showAudioPrompt(false);
       }
@@ -1649,6 +1756,11 @@ function startSyncEngine() {
           showAudioPrompt(false);
         }
       } catch (e) {}
+    }
+
+    // Autoplay blocked / engine not advancing: surface the manual "Tap to Tune In" pill.
+    if (roomPlaying && notPlayingSince && Date.now() - notPlayingSince > 1500) {
+      showAudioPrompt(true);
     }
 
     effectiveTime = Math.max(0, Math.min(effectiveTime, duration));
@@ -1708,7 +1820,7 @@ function startSyncEngine() {
           const serverPos = calculateServerPosition();
           const duration = currentRoom.currentTrack.durationSeconds || 0;
 
-          if (duration > 0 && serverPos >= duration - 0.4) {
+          if (duration > 0 && serverPos >= duration - 0.15) {
             // Track reached its end while app was in background!
             if (activeEngine === 'audio' && nativeAudio && !nativeAudio.paused) {
               try { nativeAudio.pause(); } catch (e) {}
@@ -1767,6 +1879,33 @@ function calculateServerPosition() {
   return currentRoom.playback.positionSec + elapsed;
 }
 
+function markEngineFailure(trackId, engine) {
+  if (!trackId) return new Set();
+  let engines = failedEnginesByTrack.get(trackId);
+  if (!engines) {
+    engines = new Set();
+    failedEnginesByTrack.set(trackId, engines);
+  }
+  engines.add(engine);
+  if (failedEnginesByTrack.size > 40) {
+    failedEnginesByTrack.delete(failedEnginesByTrack.keys().next().value);
+  }
+  return engines;
+}
+
+// Both engines failed for this track: tell the user and advance instead of sitting in silence.
+function requestUnplayableTrackSkip(room, trackId) {
+  if (!room?.currentTrack || !trackId) return;
+  if (room._skipRequestedForTrack === trackId) return;
+  room._skipRequestedForTrack = trackId;
+  showToast('This track cannot be played here. Skipping to the next one…', 'error');
+  if (currentUser?.isHost) {
+    socket.emit('skip-track', { endedTrackId: trackId });
+  } else {
+    socket.emit('vote-skip');
+  }
+}
+
 function fallbackToYouTubeTrack(room, reason = 'unspecified') {
   if (!room?.currentTrack) return;
   audioLog('fallback-yt', { reason, id: room.currentTrack.id, ytReady });
@@ -1775,9 +1914,13 @@ function fallbackToYouTubeTrack(room, reason = 'unspecified') {
   if (nativeAudio) {
     try {
       nativeAudio.pause();
+      nativeAudio.playbackRate = 1;
       nativeAudio.removeAttribute('src');
       nativeAudio.load();
     } catch (e) {}
+  }
+  if (reason !== 'cloud-direct-yt' && reason !== 'native-disabled-this-session') {
+    showToast('Switched to the YouTube player for this track', 'info');
   }
   if (!ytReady || !ytPlayer) {
     // YouTube API not ready yet: forget the loaded id so onReady re-runs loadCurrentTrack for this track
@@ -1808,16 +1951,24 @@ function fallbackToYouTubeTrack(room, reason = 'unspecified') {
 }
 
 // Load the room's current track into the Hybrid Audio Engine (Synchronous Native <audio> first, YouTube IFrame fallback)
-function loadCurrentTrack(room) {
+function loadCurrentTrack(room, options = {}) {
   if (!room?.currentTrack) return;
+  const { forceNative = false, reload = false } = options;
   const track = room.currentTrack;
   const trackId = track.id;
-  if (loadedTrackId === trackId) return;
+  if (loadedTrackId === trackId && !reload) return;
   loadedTrackId = trackId;
-  if (room) room._trackEndNotified = false;
+  if (room) {
+    room._trackEndNotified = false;
+    room._skipRequestedForTrack = null;
+  }
   settlePending = true;
   lastSeekAt = Date.now(); // no drift seeks while the new track is loading
-  ++loadRequestToken;
+  const token = ++loadRequestToken;
+
+  // A forced native retry (YouTube embed blocked) must not be short-circuited by an
+  // earlier failure in this page session.
+  if (forceNative) nativeAudioFailed = false;
 
   // Give every new track on mobile a fresh chance at native <audio> so one transient error never disables background play forever
   if (isMobileClient) {
@@ -1829,8 +1980,8 @@ function loadCurrentTrack(room) {
 
   // On desktop cloud hosting, YouTube direct iframe is used for zero-proxy overhead.
   // On mobile clients, attempt native <audio> first so music keeps playing in background and lock-screen!
-  // If native audio is not supported or failed, fallback to YouTube iframe immediately.
-  const bypassNative = isCloudHosted && !isMobileClient;
+  // A forced retry skips the cloud bypass so embed-blocked videos still get a second engine.
+  const bypassNative = isCloudHosted && !isMobileClient && !forceNative;
   if (bypassNative || nativeAudioFailed || !nativeAudio) {
     fallbackToYouTubeTrack(room, bypassNative ? 'cloud-direct-yt' : 'native-disabled-this-session');
     return;
@@ -1848,8 +1999,17 @@ function loadCurrentTrack(room) {
     }
 
     const startPos = Math.max(0, calculateServerPosition());
-    recordStopwatchStep('ENGINE-LOAD', `audio: /api/audio/${encodeURIComponent(trackId)} start=${startPos.toFixed(1)}s`);
-    nativeAudio.src = `/api/audio/${encodeURIComponent(trackId)}`;
+    const desiredSrc = `/api/audio/${encodeURIComponent(trackId)}`;
+    // The search-row click preloads this exact URL inside the tap gesture. Re-assigning
+    // it here would abort that request and start a second download, adding silence.
+    const alreadyLoaded = Boolean(nativeAudio.src && nativeAudio.src.endsWith(desiredSrc));
+    recordStopwatchStep('ENGINE-LOAD', `audio: ${desiredSrc} start=${startPos.toFixed(1)}s${alreadyLoaded ? ' (reuse preload)' : ''}`);
+    if (!alreadyLoaded) {
+      nativeAudio.src = desiredSrc;
+    } else {
+      audioLog('load-native-reuse', { id: trackId, readyState: nativeAudio.readyState });
+    }
+    nativeAudio.playbackRate = 1;
     nativeAudio.muted = isMuted;
     nativeAudio.volume = Math.max(0, Math.min(1, currentVolume / 100));
     audioLog('load-native', {
@@ -1864,11 +2024,13 @@ function loadCurrentTrack(room) {
     disarmNativeStallWatchdog();
     armNativeStallWatchdog();
 
-    // Seek to server position as soon as metadata is ready
+    // Seek to server position as soon as metadata is ready. The token check makes a
+    // stale listener a no-op instead of seeking the newly loaded track.
     const onLoadedMeta = () => {
-      nativeAudio.removeEventListener('loadedmetadata', onLoadedMeta);
+      if (token !== loadRequestToken) return;
       const target = Math.max(0, calculateServerPosition());
-      if (target > 0.5) {
+      // Also rewind when a reused preload is already at/near the end (replay of the same track).
+      if (target > 0.5 || nativeAudio.ended || Math.abs((nativeAudio.currentTime || 0) - target) > 2) {
         try { nativeAudio.currentTime = target; } catch (e) {}
       }
       if (currentRoom?.playback?.isPlaying && nativeAudio.paused) {
@@ -1877,7 +2039,11 @@ function loadCurrentTrack(room) {
         });
       }
     };
-    nativeAudio.addEventListener('loadedmetadata', onLoadedMeta);
+    if (nativeAudio.readyState >= 1) {
+      onLoadedMeta();
+    } else {
+      nativeAudio.addEventListener('loadedmetadata', onLoadedMeta, { once: true });
+    }
 
     if (startPos > 0.5) {
       try { nativeAudio.currentTime = startPos; } catch (e) {}
@@ -2175,6 +2341,7 @@ playPauseBtn?.addEventListener('click', () => {
     pauseIcon?.classList.add('hidden');
     currentRoom.playback.isPlaying = false;
     // 2. Immediately pause audio locally without waiting for server network roundtrip
+    localPauseIntentUntil = Date.now() + 2500;
     if (activeEngine === 'audio' && nativeAudio && !nativeAudio.paused) {
       try { nativeAudio.pause(); } catch (e) {}
     } else if (ytReady && ytPlayer && typeof ytPlayer.pauseVideo === 'function') {
@@ -2547,10 +2714,14 @@ window.handlePlayNow = (songOrEncoded) => {
     pauseIcon?.classList.remove('hidden');
     if (playerStatusBadge) playerStatusBadge.textContent = 'LOADING...';
 
-    // Optimistic audio pipeline preload within user click gesture for instant playback
-    if (nativeAudio && song?.id && (!isCloudHosted || isMobileClient) && !nativeAudioFailed) {
+    // Optimistic audio pipeline preload within user click gesture for instant playback.
+    // Skip when host-only DJ mode will reject this request, otherwise the local player
+    // would keep playing a track the room never accepted.
+    const canPlayNow = !(currentRoom?.settings?.djMode === 'host-only' && !currentUser?.isHost);
+    if (canPlayNow && nativeAudio && song?.id && (!isCloudHosted || isMobileClient) && !nativeAudioFailed) {
       const audioUrl = `/api/audio/${encodeURIComponent(song.id)}`;
       if (!nativeAudio.src.endsWith(audioUrl)) {
+        const preloadStartedAt = performance.now();
         console.log(`[AUDIO-PRELOAD] Setting nativeAudio.src to ${audioUrl}`);
         nativeAudio.src = audioUrl;
         nativeAudio.currentTime = 0;
@@ -2558,7 +2729,7 @@ window.handlePlayNow = (songOrEncoded) => {
         const playPromise = nativeAudio.play();
         if (playPromise && typeof playPromise.catch === 'function') {
           playPromise
-            .then(() => console.log(`[AUDIO-PRELOAD] nativeAudio.play() promise resolved at +${(performance.now() - t0).toFixed(0)}ms`))
+            .then(() => console.log(`[AUDIO-PRELOAD] nativeAudio.play() promise resolved at +${(performance.now() - preloadStartedAt).toFixed(0)}ms`))
             .catch((err) => console.warn(`[AUDIO-PRELOAD] nativeAudio.play() rejected:`, err));
         }
       }

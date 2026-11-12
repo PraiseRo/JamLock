@@ -10,7 +10,7 @@ class RoomManager {
     // Background periodic sweep for abandoned empty rooms (runs every 60s, 30m TTL)
     setInterval(() => {
       this.cleanupExpiredRooms(30 * 60 * 1000);
-    }, 60 * 1000);
+    }, 60 * 1000).unref?.();
   }
 
   touch(roomId) {

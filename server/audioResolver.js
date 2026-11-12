@@ -4,7 +4,7 @@
 // when switching tabs, switching apps, or locking the screen—even on cloud datacenter IPs.
 
 import { Ytdl, chooseFormat } from '@distube/ytdl-core';
-import { Readable } from 'stream';
+import { Readable, pipeline } from 'stream';
 
 const ytdl = new Ytdl();
 
@@ -248,8 +248,12 @@ export async function streamAudioToClient(req, res) {
   }
 
   const abortController = new AbortController();
-  req.on('close', () => {
-    try { abortController.abort(); } catch (e) {}
+  // Abort only when the client actually disconnects. `req` close fires when the
+  // request finishes, which can be before the response body has been streamed.
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      try { abortController.abort(); } catch (e) {}
+    }
   });
 
   let timedOut = false;
@@ -306,10 +310,13 @@ export async function streamAudioToClient(req, res) {
     }
 
     const nodeStream = Readable.fromWeb(upstreamRes.body);
-    nodeStream.on('error', () => {
-      try { res.end(); } catch (e) {}
+    // pipeline destroys the upstream read stream if the client disconnects or the
+    // socket errors; pipe() alone would leave it open.
+    pipeline(nodeStream, res, (err) => {
+      if (err && err.code !== 'ERR_STREAM_PREMATURE_CLOSE' && !abortController.signal.aborted) {
+        console.warn(`[audio] stream pipeline ended id=${videoId}: ${err?.message || err}`);
+      }
     });
-    nodeStream.pipe(res);
   } catch (e) {
     if (timedOut && !res.headersSent) {
       console.warn(`[audio] upstream TIMEOUT id=${videoId}: no response within ${UPSTREAM_TIMEOUT_MS}ms`);

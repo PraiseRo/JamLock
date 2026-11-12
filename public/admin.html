@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>JamLock - Admin Analytics & Telemetry</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="shortcut icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -294,7 +295,7 @@
     </header>
 
     <div id="auth-banner" class="auth-banner">
-      Invalid Admin Secret key. If you have not set a custom <code>ADMIN_SECRET</code> in Render, the default password is <strong>jamlock-secret-admin</strong>.
+      Admin access is disabled or the secret is invalid. Set the <code>ADMIN_SECRET</code> environment variable on the server, then enter that value above.
     </div>
 
     <!-- Top Key Metrics Cards -->
@@ -371,15 +372,21 @@
     const refreshBtn = document.getElementById('refresh-btn');
     const authBanner = document.getElementById('auth-banner');
 
-    // Auto-fill key from URL parameter or localStorage
+    // The admin secret is kept in sessionStorage only (cleared when the tab closes).
+    // Never persist it to localStorage: that would leave a permanent credential on disk.
+    try { localStorage.removeItem('jamlock_admin_key'); } catch (e) {}
     const urlParams = new URLSearchParams(window.location.search);
     const keyFromUrl = urlParams.get('key');
     if (keyFromUrl) {
       adminKeyInput.value = keyFromUrl;
-      localStorage.setItem('jamlock_admin_key', keyFromUrl);
+      try { sessionStorage.setItem('jamlock_admin_key', keyFromUrl); } catch (e) {}
+      // Scrub the secret from the address bar/history so it is not leaked by sharing the URL.
+      try { window.history.replaceState({}, '', '/admin'); } catch (e) {}
     } else {
-      const savedKey = localStorage.getItem('jamlock_admin_key');
-      if (savedKey) adminKeyInput.value = savedKey;
+      try {
+        const savedKey = sessionStorage.getItem('jamlock_admin_key');
+        if (savedKey) adminKeyInput.value = savedKey;
+      } catch (e) {}
     }
 
     function escapeHtml(str) {
@@ -402,19 +409,31 @@
         const res = await fetch('/api/admin/stats', {
           headers: {
             'x-admin-key': key
-          }
+          },
+          cache: 'no-store'
         });
         refreshBtn.textContent = 'Load Stats';
         refreshBtn.disabled = false;
 
+        if (res.status === 401) {
+          authBanner.style.display = 'block';
+          authBanner.textContent = 'Unauthorized: that Admin Secret is not valid.';
+          try { sessionStorage.removeItem('jamlock_admin_key'); } catch (e) {}
+          return;
+        }
+        if (res.status === 503) {
+          authBanner.style.display = 'block';
+          authBanner.textContent = 'Admin access is disabled on this server. Set the ADMIN_SECRET environment variable first.';
+          return;
+        }
         if (!res.ok) {
           authBanner.style.display = 'block';
-          authBanner.textContent = 'Unauthorized: Invalid Admin Secret.';
+          authBanner.textContent = `Server error (${res.status}). Please try again.`;
           return;
         }
 
         authBanner.style.display = 'none';
-        localStorage.setItem('jamlock_admin_key', key);
+        try { sessionStorage.setItem('jamlock_admin_key', key); } catch (e) {}
         const data = await res.json();
         renderDashboard(data);
       } catch (err) {
@@ -426,6 +445,11 @@
     }
 
     function renderDashboard(data) {
+      if (!data || !data.allTime || !data.live) {
+        authBanner.style.display = 'block';
+        authBanner.textContent = 'Unexpected response from the server.';
+        return;
+      }
       const { allTime, live } = data;
 
       document.getElementById('stat-users').textContent = Number(allTime.totalUniqueVisitors || 0).toLocaleString();
@@ -455,7 +479,7 @@
       tbody.innerHTML = live.activeRooms.map((r) => {
         const titleSafe = r.currentTrack ? escapeHtml(`${r.currentTrack.title} - ${r.currentTrack.artist}`) : 'None';
         const idSafe = escapeHtml(r.id);
-        const themeSafe = escapeHtml(r.theme);
+        const themeSafe = escapeHtml(r.theme || 'electric');
         const statusBadge = r.isPlaying
           ? '<span class="badge-playing">▶ Playing</span>'
           : '<span class="badge-idle">⏸ Paused / Stopped</span>';

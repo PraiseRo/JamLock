@@ -185,40 +185,62 @@ function safeOn(socket, event, handler) {
   });
 }
 
-// Advance to the next track (queue -> auto-suggest -> stop) and broadcast
+// Advance to the next track (queue -> auto-suggest -> stop) and broadcast.
+// `_advanceInFlight` prevents the host's end-of-track report and the server timer from
+// advancing twice while a recommendation fetch is still pending.
 async function advanceTrack(roomId) {
   const room = rooms.getRoom(roomId);
   if (!room) return;
+  if (room._advanceInFlight) return;
+  const advancingTrackId = room.currentTrack?.id || null;
+  room._advanceInFlight = advancingTrackId || 'none';
 
-  if (room.queue.length > 0) {
-    rooms.skipTrack(roomId);
-    metrics.recordSongPlayed();
-    // Pre-warm newly elevated track in queue
+  try {
     if (room.queue.length > 0) {
-      getYoutubeAudioFormat(room.queue[0].id).catch(() => {});
-    }
-  } else if (room.settings?.autoSuggest && room.currentTrack) {
-    const recommended = await getRecommendations(room.currentTrack, room.history);
-    if (recommended) {
-      rooms.playTrack(roomId, recommended);
+      rooms.skipTrack(roomId);
       metrics.recordSongPlayed();
-      io.to(roomId).emit('notification', {
-        type: 'queue',
-        text: `✨ Auto-suggested: ${recommended.title}`
-      });
+      // Pre-warm newly elevated track in queue
+      if (room.queue.length > 0) {
+        getYoutubeAudioFormat(room.queue[0].id).catch(() => {});
+      }
+    } else if (room.settings?.autoSuggest && room.currentTrack) {
+      const recommended = await getRecommendations(room.currentTrack, room.history);
+
+      // The track or playback state may have changed while the provider was queried.
+      const stillActive = rooms.getRoom(roomId);
+      if (
+        !stillActive ||
+        (stillActive.currentTrack?.id || null) !== advancingTrackId ||
+        !stillActive.playback?.isPlaying
+      ) {
+        return;
+      }
+
+      if (recommended) {
+        rooms.playTrack(roomId, recommended);
+        metrics.recordSongPlayed();
+        io.to(roomId).emit('notification', {
+          type: 'queue',
+          text: `✨ Auto-suggested: ${recommended.title}`
+        });
+      } else {
+        rooms.stopAtStart(roomId);
+      }
     } else {
       rooms.stopAtStart(roomId);
     }
-  } else {
-    rooms.stopAtStart(roomId);
-  }
 
-  io.to(roomId).emit('room-state', rooms.serializeRoom(room));
-  io.to(roomId).emit('track-changed', {
-    currentTrack: room.currentTrack,
-    playback: room.playback
-  });
-  scheduleAutoAdvance(roomId);
+    io.to(roomId).emit('room-state', rooms.serializeRoom(room));
+    io.to(roomId).emit('track-changed', {
+      currentTrack: room.currentTrack,
+      playback: room.playback
+    });
+    scheduleAutoAdvance(roomId);
+  } finally {
+    if (room._advanceInFlight === (advancingTrackId || 'none')) {
+      room._advanceInFlight = null;
+    }
+  }
 }
 
 // Background Auto-Suggest Pre-Queue: Pre-fetches and pre-warms the next recommended song
@@ -364,6 +386,17 @@ function checkSearchRateLimit(ip) {
   return bucket.tryConsume(1);
 }
 
+// Audio streaming is expensive (proxied bytes + upstream extraction), so cap it separately.
+const audioBuckets = new Map();
+function checkAudioRateLimit(ip) {
+  let bucket = audioBuckets.get(ip);
+  if (!bucket) {
+    bucket = new SearchTokenBucket(120, 120);
+    audioBuckets.set(ip, bucket);
+  }
+  return bucket.tryConsume(1);
+}
+
 // --- Socket join throttle & PIN brute-force lockout ---
 const joinBuckets = new Map();
 const pinFailures = new Map();
@@ -428,6 +461,11 @@ setInterval(() => {
       joinBuckets.delete(ip);
     }
   }
+  for (const [ip, bucket] of audioBuckets.entries()) {
+    if (now - bucket.lastFill > 10 * 60 * 1000) {
+      audioBuckets.delete(ip);
+    }
+  }
   for (const [ip, record] of pinFailures.entries()) {
     if (now - record.firstAt > PIN_FAILURE_WINDOW_MS && record.lockedUntil <= now) {
       pinFailures.delete(ip);
@@ -483,7 +521,7 @@ setInterval(() => {
 
 // API: Instant Fast Search with Server Cache, Token Bucket, and Stream Warmup
 app.get('/api/search', async (req, res) => {
-  const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const clientIp = req.ip || req.socket?.remoteAddress || 'unknown';
   const rateLimit = checkSearchRateLimit(clientIp);
 
   res.setHeader('X-RateLimit-Limit', '20');
@@ -566,7 +604,20 @@ app.get('/api/room/:roomId', (req, res) => {
 
 // API: Direct Audio Stream Proxy (HTTP 206 Byte-Range M4A for iOS Safari & Android background playback)
 app.get('/api/audio/:videoId', (req, res) => {
-  streamAudioToClient(req, res);
+  const clientIp = req.ip || req.socket?.remoteAddress || 'unknown';
+  const rateLimit = checkAudioRateLimit(clientIp);
+  if (!rateLimit.allowed) {
+    res.setHeader('Retry-After', String(rateLimit.retryAfterSec));
+    return res.status(429).json({ error: 'Too many audio requests. Please slow down.', reason: 'rate-limited' });
+  }
+  streamAudioToClient(req, res).catch((err) => {
+    console.warn('[audio] unhandled stream error:', err?.message || err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Audio stream error', reason: 'server-error' });
+    } else {
+      try { res.end(); } catch (e) {}
+    }
+  });
 });
 
 // API: Direct Audio Stream Resolver for Mobile Background Playback (with YT IFrame fallback)

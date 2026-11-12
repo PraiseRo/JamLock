@@ -1,7 +1,7 @@
 # JamLock - Realtime Synchronized Music Player
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-24.15%2B-green.svg)](https://nodejs.org/)
 [![Socket.io](https://img.shields.io/badge/Socket.io-4.8%2B-black.svg)](https://socket.io/)
 
 A fast, responsive web application where friends can listen to music together in real-time rooms for free.
@@ -28,6 +28,21 @@ A fast, responsive web application where friends can listen to music together in
 
 3. **Open in browser**:
    Navigate to [http://localhost:3000](http://localhost:3000)
+
+### Configuration
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `PORT` | No | HTTP port (default `3000`). |
+| `ADMIN_SECRET` | For admin | Enables `/admin`, `/api/admin/stats`, and `/api/telemetry`. Without it those routes return `503`. |
+| `IDENTITY_SECRET` | Recommended | HMAC key for the signed `jl_identity` cookie. Set a long random value in production so identities survive restarts. |
+| `APP_ORIGIN` | No | Enables CORS for one explicit origin. Leave unset for the normal same-origin deployment. |
+
+Run the regression suite with:
+
+```bash
+npm test
+```
 
 4. **Listen Together**:
    - Create a room (e.g. `ROOM-ABCD`).

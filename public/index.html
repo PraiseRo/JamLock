@@ -37,7 +37,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/style.css?v=2.1">
+  <link rel="stylesheet" href="/style.css?v=2.2">
   <script src="/socket.io/socket.io.js"></script>
 
   <!-- Pre-paint room view check: ONLY activate when URL specifically points to a room -->
@@ -613,7 +613,12 @@
 
         <div>
           <label style="display: block; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px">Room Security PIN (Optional)</label>
-          <input id="setting-room-pin" type="text" maxlength="8" placeholder="Leave blank for public room" style="width: 100%; height: 44px; border-radius: 999px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 16px; font-family: monospace; font-size: 14px">
+          <input id="setting-room-pin" type="text" inputmode="numeric" maxlength="8" placeholder="Optional: 4–8 digits" style="width: 100%; height: 44px; border-radius: 999px; border: 1px solid var(--border-ctrl); background: var(--input-bg); color: var(--text-main); padding: 0 16px; font-family: monospace; font-size: 14px">
+          <label id="room-pin-remove-row" class="hidden" style="display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--text-muted); cursor: pointer">
+            <input id="setting-room-pin-remove" type="checkbox" style="accent-color: var(--coral); width: 15px; height: 15px; cursor: pointer">
+            <span>Remove current PIN (make room public)</span>
+          </label>
+          <p id="room-pin-status" style="margin: 6px 0 0; font-size: 11px; color: var(--text-muted)"></p>
         </div>
       </div>
 
@@ -669,6 +674,6 @@
   </div>
 
   <script src="https://www.youtube.com/iframe_api"></script>
-  <script type="module" src="/app.js?v=2.1"></script>
+  <script type="module" src="/app.js?v=2.2"></script>
 </body>
 </html>
