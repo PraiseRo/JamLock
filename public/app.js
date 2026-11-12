@@ -321,6 +321,45 @@ const leaveConfirmModal = document.getElementById('leave-confirm-modal');
 const cancelLeaveBtn = document.getElementById('cancel-leave-btn');
 const confirmLeaveBtn = document.getElementById('confirm-leave-btn');
 
+// Keyboard accessibility for dialogs: trap Tab inside the open modal and close on Escape.
+function installModalA11y(modal, onClose) {
+  if (!modal) return;
+  modal.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const focusables = Array.from(modal.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )).filter((el) => el.offsetParent !== null);
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const focusOutside = !modal.contains(document.activeElement);
+    if (e.shiftKey && (document.activeElement === first || focusOutside)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (document.activeElement === last || focusOutside)) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
+}
+
+installModalA11y(settingsModal, () => {
+  closeAllCustomDropdowns();
+  settingsModal?.classList.add('hidden');
+  hostSettingsBtn?.focus();
+});
+
+installModalA11y(leaveConfirmModal, () => {
+  leaveConfirmModal?.classList.add('hidden');
+  leaveRoomBtn?.focus();
+});
+
 // --- 1. DYNAMIC WAVY PROGRESS BAR SETUP (Unified PC & Mobile) ---
 const wavyContainer = document.getElementById('wavy-progress-container');
 const waveBasePath = document.getElementById('wave-base-path');
@@ -543,6 +582,8 @@ function updateWaveformProgress(progressPercent) {
 // --- 2. VOLUME CONTROLS ---
 const nativeAudio = document.getElementById('native-audio-player');
 const isMobileClient = /mobile|android|iphone|ipad|ipod/i.test(navigator.userAgent);
+let iosVolumeHintShown = false;
+try { iosVolumeHintShown = sessionStorage.getItem('jamlock_ios_volume_hint') === '1'; } catch (e) {}
 // Default engine: On desktop cloud, YouTube direct iframe is 100% reliable without proxy stalls.
 // On mobile devices, default to native <audio> so background playback and lock-screen controls work without OS suspension.
 const isCloudHosted = window.location.hostname.includes('render.com') || window.location.hostname.includes('koyeb') || window.location.hostname.includes('railway');
@@ -572,6 +613,11 @@ if (volumeSlider) {
     if (ytReady && ytPlayer && typeof ytPlayer.setVolume === 'function') {
       ytPlayer.unMute();
       ytPlayer.setVolume(currentVolume);
+    }
+    if (isIOS && !iosVolumeHintShown) {
+      iosVolumeHintShown = true;
+      try { sessionStorage.setItem('jamlock_ios_volume_hint', '1'); } catch (e) {}
+      showToast('On iPhone/iPad, use the hardware volume buttons — Safari does not expose system volume.', 'info');
     }
   });
 }
@@ -907,10 +953,12 @@ function joinRoom(roomId, explicitUsername, isCreating = false, pin = null) {
 // Leave confirmation modal
 leaveRoomBtn?.addEventListener('click', () => {
   leaveConfirmModal?.classList.remove('hidden');
+  cancelLeaveBtn?.focus();
 });
 
 cancelLeaveBtn?.addEventListener('click', () => {
   leaveConfirmModal?.classList.add('hidden');
+  leaveRoomBtn?.focus();
 });
 
 // Unified leave room handler (used by confirm button, kick event, and room-not-found)
@@ -993,6 +1041,7 @@ function syncCustomDropdown(wrapId, value) {
   options.forEach((opt) => {
     const isMatch = opt.getAttribute('data-value') === value;
     opt.classList.toggle('is-selected', isMatch);
+    opt.setAttribute('aria-selected', isMatch ? 'true' : 'false');
     if (isMatch && label) {
       const optText = opt.querySelector('.option-text')?.textContent || opt.textContent;
       label.textContent = optText.trim();
@@ -1025,17 +1074,58 @@ function initCustomDropdowns() {
       }
     });
 
-    options.forEach((opt) => {
-      opt.addEventListener('click', (e) => {
-        e.stopPropagation();
+    // Keyboard: ArrowDown opens the menu and moves focus to the selected option.
+    pill?.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowDown') return;
+      e.preventDefault();
+      e.stopPropagation();
+      wrap.classList.add('is-open');
+      pill.setAttribute('aria-expanded', 'true');
+      const selected = wrap.querySelector('.custom-dropdown-option.is-selected') || options[0];
+      selected?.focus();
+    });
+
+    options.forEach((opt, index) => {
+      opt.tabIndex = 0;
+      opt.setAttribute('role', 'option');
+      opt.setAttribute('aria-selected', opt.classList.contains('is-selected') ? 'true' : 'false');
+
+      const chooseOption = () => {
         const val = opt.getAttribute('data-value');
         if (input) input.value = val;
         const text = opt.querySelector('.option-text')?.textContent || opt.textContent;
         if (label) label.textContent = text.trim();
 
-        options.forEach((o) => o.classList.toggle('is-selected', o === opt));
+        options.forEach((o) => {
+          const selected = o === opt;
+          o.classList.toggle('is-selected', selected);
+          o.setAttribute('aria-selected', selected ? 'true' : 'false');
+        });
         wrap.classList.remove('is-open');
         pill?.setAttribute('aria-expanded', 'false');
+        pill?.focus();
+      };
+
+      opt.addEventListener('click', (e) => {
+        e.stopPropagation();
+        chooseOption();
+      });
+
+      opt.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          chooseOption();
+          return;
+        }
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return;
+        e.preventDefault();
+        const list = Array.from(options);
+        let nextIndex = index;
+        if (e.key === 'ArrowDown') nextIndex = (index + 1) % list.length;
+        else if (e.key === 'ArrowUp') nextIndex = (index - 1 + list.length) % list.length;
+        else if (e.key === 'Home') nextIndex = 0;
+        else if (e.key === 'End') nextIndex = list.length - 1;
+        list[nextIndex]?.focus();
       });
     });
   });
@@ -1090,6 +1180,7 @@ hostSettingsBtn?.addEventListener('click', () => {
   }
   closeAllCustomDropdowns();
   settingsModal?.classList.remove('hidden');
+  closeSettingsModalBtn?.focus();
 });
 
 settingRoomPinRemove?.addEventListener('change', () => {
@@ -1103,6 +1194,7 @@ settingRoomPinRemove?.addEventListener('change', () => {
 closeSettingsModalBtn?.addEventListener('click', () => {
   closeAllCustomDropdowns();
   settingsModal?.classList.add('hidden');
+  hostSettingsBtn?.focus();
 });
 
 saveSettingsBtn?.addEventListener('click', () => {
@@ -1126,6 +1218,7 @@ saveSettingsBtn?.addEventListener('click', () => {
 
   socket.emit('update-room-settings', payload);
   settingsModal?.classList.add('hidden');
+  hostSettingsBtn?.focus();
 });
 
 // --- 6. SYNCHRONIZATION, HYBRID AUDIO ENGINE & LOCK-SCREEN MEDIA SESSION ---
@@ -1898,6 +1991,7 @@ function requestUnplayableTrackSkip(room, trackId) {
   if (!room?.currentTrack || !trackId) return;
   if (room._skipRequestedForTrack === trackId) return;
   room._skipRequestedForTrack = trackId;
+  if (playerStatusBadge) playerStatusBadge.textContent = 'SKIPPING…';
   showToast('This track cannot be played here. Skipping to the next one…', 'error');
   if (currentUser?.isHost) {
     socket.emit('skip-track', { endedTrackId: trackId });
@@ -1920,6 +2014,7 @@ function fallbackToYouTubeTrack(room, reason = 'unspecified') {
     } catch (e) {}
   }
   if (reason !== 'cloud-direct-yt' && reason !== 'native-disabled-this-session') {
+    if (playerStatusBadge) playerStatusBadge.textContent = 'RETRYING PLAYER…';
     showToast('Switched to the YouTube player for this track', 'info');
   }
   if (!ytReady || !ytPlayer) {

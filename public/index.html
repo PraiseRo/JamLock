@@ -37,7 +37,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/style.css?v=2.2">
+  <link rel="stylesheet" href="/style.css?v=2.3">
   <script src="/socket.io/socket.io.js"></script>
 
   <!-- Pre-paint room view check: ONLY activate when URL specifically points to a room -->
@@ -497,7 +497,7 @@
   </div>
 
   <!-- TOAST NOTIFICATION CONTAINER -->
-  <div id="toast-container" style="position: fixed; bottom: 24px; right: 24px; z-index: 50; display: flex; flex-direction: column; gap: 8px; pointer-events: none"></div>
+  <div id="toast-container" role="status" aria-live="polite" style="position: fixed; bottom: 24px; right: 24px; z-index: 50; display: flex; flex-direction: column; gap: 8px; pointer-events: none"></div>
 
   <!-- GUEST QUICK JOIN MODAL (Shown when joining via invite link with no saved name) -->
   <div id="quick-join-modal" class="hidden" style="position: fixed; inset: 0; z-index: 10000; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(5,5,8,0.88); backdrop-filter: blur(12px)">
@@ -532,10 +532,10 @@
   </div>
 
   <!-- HOST PERMISSIONS MODAL -->
-  <div id="settings-modal" class="hidden" style="position: fixed; inset: 0; z-index: 9999; display: none; align-items: center; justify-content: center; padding: 16px; background: rgba(0,0,0,0.85)">
+  <div id="settings-modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title" style="position: fixed; inset: 0; z-index: 9999; display: none; align-items: center; justify-content: center; padding: 16px; background: rgba(0,0,0,0.85)">
     <div class="card animate-scaleUp" style="max-width: 380px; width: 100%; padding: 24px">
       <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-ctrl); padding-bottom: 12px">
-        <h3 style="margin: 0; font-size: 16px; font-weight: 700; color: var(--text-main)">Room Host Controls</h3>
+        <h3 id="settings-modal-title" style="margin: 0; font-size: 16px; font-weight: 700; color: var(--text-main)">Room Host Controls</h3>
         <button id="close-settings-modal-btn" style="background: none; border: 0; color: var(--text-muted); font-size: 16px">✕</button>
       </div>
 
@@ -629,13 +629,13 @@
   </div>
 
   <!-- CONFIRM LEAVE ROOM MODAL -->
-  <div id="leave-confirm-modal" class="hidden" style="position: fixed; inset: 0; z-index: 9999; display: none; align-items: center; justify-content: center; padding: 16px; background: rgba(0,0,0,0.88)">
+  <div id="leave-confirm-modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="leave-modal-title" style="position: fixed; inset: 0; z-index: 9999; display: none; align-items: center; justify-content: center; padding: 16px; background: rgba(0,0,0,0.88)">
     <div class="card animate-scaleUp" style="max-width: 360px; width: 100%; padding: 26px; text-align: center; gap: 16px">
       <div style="width: 50px; height: 50px; border-radius: 50%; background: rgba(255,90,78,0.12); border: 1px solid rgba(255,90,78,0.25); color: var(--coral); display: flex; align-items: center; justify-content: center; margin: 0 auto">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
       </div>
       <div>
-        <h3 style="margin: 0; font-size: 18px; font-weight: 700">Leave Listening Room?</h3>
+        <h3 id="leave-modal-title" style="margin: 0; font-size: 18px; font-weight: 700">Leave Listening Room?</h3>
         <p style="margin: 8px 0 0; font-size: 13px; color: var(--text-secondary); line-height: 1.5">You will disconnect from the group session and return to the home screen.</p>
       </div>
       <div style="display: flex; gap: 10px; margin-top: 4px">
@@ -674,6 +674,6 @@
   </div>
 
   <script src="https://www.youtube.com/iframe_api"></script>
-  <script type="module" src="/app.js?v=2.2"></script>
+  <script type="module" src="/app.js?v=2.3"></script>
 </body>
 </html>

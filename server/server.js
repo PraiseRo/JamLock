@@ -18,6 +18,9 @@ const __dirname = path.dirname(__filename);
 const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
 const ALLOWED_ORIGIN = process.env.APP_ORIGIN || '';
 const IDENTITY_SECRET = process.env.IDENTITY_SECRET || crypto.randomBytes(32).toString('hex');
+if (!process.env.IDENTITY_SECRET) {
+  console.warn('[auth] IDENTITY_SECRET is not set; using a random key. Room identities will reset on restart.');
+}
 const IDENTITY_COOKIE = 'jl_identity';
 const IDENTITY_MAX_AGE_MS = 365 * 24 * 60 * 60 * 1000;
 
@@ -711,7 +714,7 @@ io.on('connection', (socket) => {
   });
 
   // Join or Create Room
-  safeOn(socket, 'join-room', (payload, maybeCallback) => {
+  safeOn(socket, 'join-room', async (payload, maybeCallback) => {
     const callback = typeof maybeCallback === 'function'
       ? maybeCallback
       : (typeof payload === 'function' ? payload : null);
@@ -770,7 +773,7 @@ io.on('connection', (socket) => {
 
     const wasExisting = rooms.hasRoom(cleanId);
     // Identity always comes from the server-verified cookie/session, never from payload.clientId.
-    const joinRes = rooms.addUser(cleanId, socket.id, cleanUsername, socket.data.clientId, pin);
+    const joinRes = await rooms.addUser(cleanId, socket.id, cleanUsername, socket.data.clientId, pin);
     if (joinRes?.error) {
       if (joinRes.error === 'invalid_pin') recordPinFailure(ip);
       if (callback) {
@@ -1006,7 +1009,7 @@ io.on('connection', (socket) => {
   });
 
   // Update Room Settings (Host Only)
-  safeOn(socket, 'update-room-settings', (payload) => {
+  safeOn(socket, 'update-room-settings', async (payload) => {
     if (!currentRoomId || !isPlainObject(payload)) return;
     const room = rooms.getRoom(currentRoomId);
     const user = room?.users.get(socket.id);
@@ -1042,7 +1045,7 @@ io.on('connection', (socket) => {
 
     Object.assign(room.settings, patch);
     if (pinAction !== undefined) {
-      rooms.setRoomPin(currentRoomId, pinAction);
+      await rooms.setRoomPin(currentRoomId, pinAction);
     }
     io.to(currentRoomId).emit('room-state', rooms.serializeRoom(room));
     io.to(currentRoomId).emit('notification', {
@@ -1473,3 +1476,28 @@ const PORT = Number(process.env.PORT) || 3000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🎵 JamLock Server running on http://0.0.0.0:${PORT}`);
 });
+
+// Graceful shutdown for PaaS deploys (Render/Railway/Koyeb send SIGTERM).
+// Close Socket.IO first so long-lived WebSocket connections do not hold the HTTP server open.
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[server] ${signal} received; closing connections...`);
+  const forceExit = setTimeout(() => {
+    console.warn('[server] Forced exit after shutdown timeout');
+    process.exit(0);
+  }, 5000);
+  forceExit.unref?.();
+  try {
+    io.close(() => {
+      clearTimeout(forceExit);
+      process.exit(0);
+    });
+  } catch (e) {
+    clearTimeout(forceExit);
+    process.exit(0);
+  }
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

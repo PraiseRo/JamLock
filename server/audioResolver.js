@@ -36,6 +36,71 @@ const INVIDIOUS_INSTANCES = [
   'https://inv.nadeko.net'
 ];
 
+// Dead public Piped/Invidious instances were being retried on every extraction,
+// wasting the whole fallback budget. Track consecutive failures and cool each host
+// down for 2 minutes after 2 failed attempts.
+const INSTANCE_COOLDOWN_MS = 2 * 60 * 1000;
+const INSTANCE_FAILURE_THRESHOLD = 2;
+const INSTANCE_HEALTH = new Map();
+
+function instanceKey(base) {
+  try { return new URL(base).hostname; } catch (e) { return base; }
+}
+
+function availableInstances(instances) {
+  const healthy = instances.filter((base) => {
+    const entry = INSTANCE_HEALTH.get(instanceKey(base));
+    return !entry?.cooldownUntil || entry.cooldownUntil <= Date.now();
+  });
+  if (healthy.length) return healthy;
+
+  // Everything is cooling down: probe only the instance that is closest to recovery,
+  // so we notice it coming back without retrying every dead host.
+  let soonest = null;
+  let soonestAt = Infinity;
+  for (const base of instances) {
+    const entry = INSTANCE_HEALTH.get(instanceKey(base));
+    if (entry?.cooldownUntil && entry.cooldownUntil < soonestAt) {
+      soonestAt = entry.cooldownUntil;
+      soonest = base;
+    }
+  }
+  return soonest ? [soonest] : instances;
+}
+
+function markInstanceFailure(base) {
+  const key = instanceKey(base);
+  const entry = INSTANCE_HEALTH.get(key) || { failures: 0, cooldownUntil: 0 };
+  entry.failures += 1;
+  if (entry.failures >= INSTANCE_FAILURE_THRESHOLD) {
+    entry.cooldownUntil = Date.now() + INSTANCE_COOLDOWN_MS;
+    entry.failures = 0;
+  }
+  if (INSTANCE_HEALTH.size >= 100) {
+    INSTANCE_HEALTH.delete(INSTANCE_HEALTH.keys().next().value);
+  }
+  INSTANCE_HEALTH.set(key, entry);
+}
+
+function markInstanceSuccess(base) {
+  INSTANCE_HEALTH.delete(instanceKey(base));
+}
+
+// Googlevideo URLs carry an `expire` epoch. Stop serving a cached URL shortly before
+// it expires instead of trusting the fixed 20-minute TTL.
+function cacheExpiryFor(url, fallbackExpiry) {
+  try {
+    const raw = new URL(url).searchParams.get('expire');
+    if (raw) {
+      const expiresAt = Number(raw) * 1000;
+      if (Number.isFinite(expiresAt) && expiresAt > 0) {
+        return Math.min(fallbackExpiry, expiresAt - 60 * 1000);
+      }
+    }
+  } catch (e) {}
+  return fallbackExpiry;
+}
+
 function withTimeout(promise, ms, label) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -79,7 +144,7 @@ async function extractViaYtdl(videoId) {
 }
 
 async function extractViaPiped(videoId) {
-  const attempts = PIPED_INSTANCES.map(async (base) => {
+  const attempts = availableInstances(PIPED_INSTANCES).map(async (base) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FALLBACK_API_TIMEOUT_MS);
     try {
@@ -101,6 +166,7 @@ async function extractViaPiped(videoId) {
         .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
       const chosen = m4a || anyAudio;
       if (!chosen?.url) throw new Error(`Piped ${base} no audioStreams`);
+      markInstanceSuccess(base);
       return {
         url: chosen.url,
         mimeType: (chosen.mimeType || 'audio/mp4').split(';')[0].trim(),
@@ -108,6 +174,9 @@ async function extractViaPiped(videoId) {
         itag: chosen.itag || 140,
         provider: `piped:${new URL(base).hostname}`
       };
+    } catch (err) {
+      markInstanceFailure(base);
+      throw err;
     } finally {
       clearTimeout(timer);
     }
@@ -117,7 +186,7 @@ async function extractViaPiped(videoId) {
 }
 
 async function extractViaInvidious(videoId) {
-  const attempts = INVIDIOUS_INSTANCES.map(async (base) => {
+  const attempts = availableInstances(INVIDIOUS_INSTANCES).map(async (base) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FALLBACK_API_TIMEOUT_MS);
     try {
@@ -139,6 +208,7 @@ async function extractViaInvidious(videoId) {
         .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))[0];
       const chosen = m4a || anyAudio;
       if (!chosen?.url) throw new Error(`Invidious ${base} no adaptiveFormats`);
+      markInstanceSuccess(base);
 
       // Use Invidious instance's local proxy URL so datacenter IP blocks on googlevideo are bypassed
       const proxiedUrl = `${base}/latest_version?id=${encodeURIComponent(videoId)}&itag=${encodeURIComponent(chosen.itag || 140)}&local=true`;
@@ -150,6 +220,9 @@ async function extractViaInvidious(videoId) {
         itag: Number(chosen.itag) || 140,
         provider: `invidious:${new URL(base).hostname}`
       };
+    } catch (err) {
+      markInstanceFailure(base);
+      throw err;
     } finally {
       clearTimeout(timer);
     }
@@ -164,9 +237,10 @@ export async function getYoutubeAudioFormat(videoId, options = {}) {
 
   if (!forceRefresh && !skipYtdl) {
     const cached = FORMAT_CACHE.get(videoId);
-    if (cached && Date.now() - cached.timestamp < FORMAT_TTL_MS) {
+    if (cached && Date.now() < cached.expiresAt) {
       return cached.data;
     }
+    if (cached) FORMAT_CACHE.delete(videoId);
 
     const failedAt = FAIL_CACHE.get(videoId);
     if (failedAt && Date.now() - failedAt < FAIL_TTL_MS) {
@@ -206,11 +280,16 @@ export async function getYoutubeAudioFormat(videoId, options = {}) {
     }
 
     if (data?.url) {
-      if (FORMAT_CACHE.size >= FORMAT_MAX) {
-        const oldest = FORMAT_CACHE.keys().next().value;
-        FORMAT_CACHE.delete(oldest);
+      const now = Date.now();
+      const expiresAt = cacheExpiryFor(data.url, now + FORMAT_TTL_MS);
+      // Do not cache a URL whose signature is already (or almost) expired.
+      if (expiresAt > now + 5000) {
+        if (FORMAT_CACHE.size >= FORMAT_MAX) {
+          const oldest = FORMAT_CACHE.keys().next().value;
+          FORMAT_CACHE.delete(oldest);
+        }
+        FORMAT_CACHE.set(videoId, { data, timestamp: now, expiresAt });
       }
-      FORMAT_CACHE.set(videoId, { data, timestamp: Date.now() });
       FAIL_CACHE.delete(videoId);
       console.log(`[audio] extract ok id=${videoId} provider=${data.provider} itag=${data.itag} in ${Date.now() - startedAt}ms`);
       return data;

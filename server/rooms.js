@@ -1,6 +1,8 @@
 // In-Memory Room Management & Realtime Sync Engine
 import crypto from 'crypto';
+import { promisify } from 'util';
 
+const scryptAsync = promisify(crypto.scrypt);
 const MAX_QUEUE_LENGTH = 100;
 const MAX_USERS_PER_ROOM = 50;
 
@@ -81,7 +83,7 @@ class RoomManager {
     return this.rooms.has(roomId.trim().toUpperCase());
   }
 
-  setRoomPin(roomId, pin) {
+  async setRoomPin(roomId, pin) {
     const room = this.getRoom(roomId);
     if (!room) return null;
 
@@ -95,25 +97,32 @@ class RoomManager {
 
     if (!/^\d{4,8}$/.test(normalized)) return null;
     const salt = crypto.randomBytes(16);
-    room.pinSalt = salt.toString('hex');
-    room.pinHash = crypto.scryptSync(normalized, salt, 32).toString('hex');
+    // Compute both locally, then assign together. Two overlapping PIN changes must not
+    // interleave a salt from one call with a hash from another.
+    const pinSalt = salt.toString('hex');
+    const pinHash = (await scryptAsync(normalized, salt, 32)).toString('hex');
+    room.pinSalt = pinSalt;
+    room.pinHash = pinHash;
     room.hasPin = true;
     return room;
   }
 
-  verifyRoomPin(room, providedPin) {
+  async verifyRoomPin(room, providedPin) {
     if (!room?.hasPin) return true;
     if (!room.pinHash || !room.pinSalt) return false;
 
     const candidate = String(providedPin ?? '').trim().slice(0, 8);
     if (!/^\d{4,8}$/.test(candidate)) return false;
 
+    // Snapshot the stored values before awaiting so a concurrent PIN change cannot
+    // produce a partial comparison.
     const expected = Buffer.from(room.pinHash, 'hex');
-    const actual = crypto.scryptSync(candidate, Buffer.from(room.pinSalt, 'hex'), expected.length);
+    const salt = Buffer.from(room.pinSalt, 'hex');
+    const actual = await scryptAsync(candidate, salt, expected.length);
     return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
   }
 
-  addUser(roomId, socketId, username, clientId, providedPin) {
+  async addUser(roomId, socketId, username, clientId, providedPin) {
     const room = this.getOrCreateRoom(roomId);
     room.emptySince = null;
     const resolvedClientId = clientId || socketId;
@@ -128,7 +137,7 @@ class RoomManager {
           break;
         }
       }
-      if (!isExistingRecognizedUser && !this.verifyRoomPin(room, providedPin)) {
+      if (!isExistingRecognizedUser && !(await this.verifyRoomPin(room, providedPin))) {
         return { error: 'invalid_pin', message: 'This room is private. Incorrect or missing PIN.' };
       }
     }

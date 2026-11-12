@@ -176,10 +176,10 @@ async function join(client, roomId, username, extra = {}) {
 
 // --- Unit tests: room state / PIN handling ---
 
-test('room serialization never includes the plaintext PIN', () => {
+test('room serialization never includes the plaintext PIN', async () => {
   const roomId = uniqueRoom('P');
   rooms.getOrCreateRoom(roomId);
-  rooms.setRoomPin(roomId, '1234');
+  await rooms.setRoomPin(roomId, '1234');
 
   const room = rooms.getRoom(roomId);
   const serialized = rooms.serializeRoom(room);
@@ -187,23 +187,23 @@ test('room serialization never includes the plaintext PIN', () => {
   assert.equal(Object.prototype.hasOwnProperty.call(serialized.settings, 'pin'), false);
   assert.equal(JSON.stringify(serialized).includes('"1234"'), false);
 
-  assert.equal(rooms.verifyRoomPin(room, '1234'), true);
-  assert.equal(rooms.verifyRoomPin(room, '9999'), false);
+  assert.equal(await rooms.verifyRoomPin(room, '1234'), true);
+  assert.equal(await rooms.verifyRoomPin(room, '9999'), false);
 
-  rooms.setRoomPin(roomId, null);
+  await rooms.setRoomPin(roomId, null);
   assert.equal(rooms.serializeRoom(room).settings.hasPin, false);
 });
 
-test('rooms add users with PIN verification and never grant host to a second user', () => {
+test('rooms add users with PIN verification and never grant host to a second user', async () => {
   const roomId = uniqueRoom('U');
-  const host = rooms.addUser(roomId, 'sock-host', 'Host', 'cid_unit_host');
+  const host = await rooms.addUser(roomId, 'sock-host', 'Host', 'cid_unit_host');
   assert.equal(host.user.isHost, true);
 
-  rooms.setRoomPin(roomId, '4321');
-  const wrong = rooms.addUser(roomId, 'sock-guest', 'Guest', 'cid_unit_guest', '1111');
+  await rooms.setRoomPin(roomId, '4321');
+  const wrong = await rooms.addUser(roomId, 'sock-guest', 'Guest', 'cid_unit_guest', '1111');
   assert.equal(wrong.error, 'invalid_pin');
 
-  const guest = rooms.addUser(roomId, 'sock-guest', 'Guest', 'cid_unit_guest', '4321');
+  const guest = await rooms.addUser(roomId, 'sock-guest', 'Guest', 'cid_unit_guest', '4321');
   assert.equal(guest.user.isHost, false);
   assert.equal(rooms.getUniqueUsers(rooms.getRoom(roomId)).length, 2);
 });
@@ -376,4 +376,116 @@ test('room PIN is required to join, is not leaked over HTTP, and can be removed'
   host.close();
   guest.close();
   noPinGuest.close();
+});
+
+test('host-only DJ mode blocks guest playback', async () => {
+  const roomId = uniqueRoom('D');
+  const host = connectSocket();
+  await host.ready;
+  const hostAck = await join(host, roomId, 'DJHost');
+  assert.equal(hostAck.success, true);
+
+  const guest = connectSocket();
+  await guest.ready;
+  const guestAck = await guest.request('join-room', {
+    roomId,
+    username: 'DJGuest',
+    isCreating: false
+  });
+  assert.equal(guestAck.success, true);
+
+  host.emit('update-room-settings', { djMode: 'host-only' });
+  await sleep(250);
+
+  const denied = guest.once('notification');
+  guest.emit('play', { positionSec: 0 });
+  const deniedNote = await denied;
+  assert.match(deniedNote.text, /restricted to the room host/i);
+
+  // The host still has control.
+  host.emit('play', { positionSec: 0 });
+  await sleep(200);
+  const room = await (await fetch(`${BASE}/api/room/${roomId}`)).json();
+  assert.equal(room.settings.djMode, 'host-only');
+  assert.equal(room.playback.isPlaying, true);
+
+  host.close();
+  guest.close();
+});
+
+test('a stale skip report cannot advance the queue twice', async () => {
+  const roomId = uniqueRoom('K');
+  const host = connectSocket();
+  await host.ready;
+  const hostAck = await join(host, roomId, 'SkipHost');
+  assert.equal(hostAck.success, true);
+
+  const makeTrack = (id, title) => ({
+    id,
+    title,
+    artist: 'Test Artist',
+    durationSeconds: 200,
+    thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`
+  });
+
+  host.emit('play-now', { track: makeTrack('AAAAAAAAAAA', 'Track A') });
+  await sleep(1500);
+  let room = await (await fetch(`${BASE}/api/room/${roomId}`)).json();
+  assert.equal(room.currentTrack?.id, 'AAAAAAAAAAA');
+
+  host.emit('add-to-queue', { track: makeTrack('BBBBBBBBBBB', 'Track B') });
+  host.emit('add-to-queue', { track: makeTrack('CCCCCCCCCCC', 'Track C') });
+  await sleep(300);
+  room = await (await fetch(`${BASE}/api/room/${roomId}`)).json();
+  assert.deepEqual(room.queue.map((t) => t.id), ['BBBBBBBBBBB', 'CCCCCCCCCCC']);
+
+  // Both reports refer to the track that was current when the skip started. The
+  // second one must not skip the newly promoted Track B as well.
+  host.emit('skip-track', { endedTrackId: 'AAAAAAAAAAA' });
+  host.emit('skip-track', { endedTrackId: 'AAAAAAAAAAA' });
+  await sleep(400);
+  room = await (await fetch(`${BASE}/api/room/${roomId}`)).json();
+  assert.equal(room.currentTrack?.id, 'BBBBBBBBBBB');
+  assert.deepEqual(room.queue.map((t) => t.id), ['CCCCCCCCCCC']);
+
+  host.close();
+});
+
+// Keep this last: a PIN lockout is keyed by client IP, which is shared by every
+// socket in this test process.
+test('repeated wrong PIN attempts lock the client IP', async () => {
+  const roomId = uniqueRoom('L');
+  const host = connectSocket();
+  await host.ready;
+  const hostAck = await join(host, roomId, 'LockHost');
+  assert.equal(hostAck.success, true);
+
+  host.emit('update-room-settings', { pin: '9876' });
+  await sleep(250);
+
+  const guesser = connectSocket();
+  await guesser.ready;
+  for (let i = 0; i < 8; i++) {
+    const res = await guesser.request('join-room', {
+      roomId,
+      username: 'Guesser',
+      isCreating: false,
+      pin: '0000'
+    });
+    assert.equal(res.success, false);
+    assert.equal(res.code, 'invalid_pin');
+  }
+
+  // Even the correct PIN is refused once the lockout is active.
+  const locked = await guesser.request('join-room', {
+    roomId,
+    username: 'Guesser',
+    isCreating: false,
+    pin: '9876'
+  });
+  assert.equal(locked.success, false);
+  assert.equal(locked.code, 'pin_locked');
+
+  host.close();
+  guesser.close();
 });
