@@ -11,16 +11,15 @@ import { rooms } from './rooms.js';
 import { searchSongs, getRecommendations, getMultipleRecommendations } from './search.js';
 import { resolveAudioStream, streamAudioToClient, getYoutubeAudioFormat } from './audioResolver.js';
 import { metrics } from './metrics.js';
+import { loadIdentitySecret } from './identity.js';
+import { createGracefulShutdown } from './shutdown.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
 const ALLOWED_ORIGIN = process.env.APP_ORIGIN || '';
-const IDENTITY_SECRET = process.env.IDENTITY_SECRET || crypto.randomBytes(32).toString('hex');
-if (!process.env.IDENTITY_SECRET) {
-  console.warn('[auth] IDENTITY_SECRET is not set; using a random key. Room identities will reset on restart.');
-}
+const IDENTITY_SECRET = loadIdentitySecret();
 const IDENTITY_COOKIE = 'jl_identity';
 const IDENTITY_MAX_AGE_MS = 365 * 24 * 60 * 60 * 1000;
 
@@ -1479,25 +1478,6 @@ server.listen(PORT, '0.0.0.0', () => {
 
 // Graceful shutdown for PaaS deploys (Render/Railway/Koyeb send SIGTERM).
 // Close Socket.IO first so long-lived WebSocket connections do not hold the HTTP server open.
-let shuttingDown = false;
-function shutdown(signal) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(`[server] ${signal} received; closing connections...`);
-  const forceExit = setTimeout(() => {
-    console.warn('[server] Forced exit after shutdown timeout');
-    process.exit(0);
-  }, 5000);
-  forceExit.unref?.();
-  try {
-    io.close(() => {
-      clearTimeout(forceExit);
-      process.exit(0);
-    });
-  } catch (e) {
-    clearTimeout(forceExit);
-    process.exit(0);
-  }
-}
+const shutdown = createGracefulShutdown({ io });
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));

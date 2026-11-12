@@ -322,15 +322,13 @@ const cancelLeaveBtn = document.getElementById('cancel-leave-btn');
 const confirmLeaveBtn = document.getElementById('confirm-leave-btn');
 
 // Keyboard accessibility for dialogs: trap Tab inside the open modal and close on Escape.
+// Escape is handled at the document level so it works even if focus is on the page
+// outside the dialog (which is common after clicking the backdrop).
+const modalA11yRegistry = [];
 function installModalA11y(modal, onClose) {
   if (!modal) return;
+  modalA11yRegistry.push({ modal, onClose });
   modal.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      onClose();
-      return;
-    }
     if (e.key !== 'Tab') return;
     const focusables = Array.from(modal.querySelectorAll(
       'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
@@ -348,6 +346,22 @@ function installModalA11y(modal, onClose) {
     }
   });
 }
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const openEntry = modalA11yRegistry.find(({ modal }) => !modal.classList.contains('hidden'));
+  if (!openEntry) return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  // First Escape closes an open dropdown, leaving the dialog itself open.
+  const openDropdown = openEntry.modal.querySelector('.custom-dropdown-wrap.is-open');
+  if (openDropdown) {
+    closeAllCustomDropdowns();
+    return;
+  }
+  openEntry.onClose();
+}, true);
 
 installModalA11y(settingsModal, () => {
   closeAllCustomDropdowns();
@@ -580,7 +594,93 @@ function updateWaveformProgress(progressPercent) {
 }
 
 // --- 2. VOLUME CONTROLS ---
-const nativeAudio = document.getElementById('native-audio-player');
+const nativeAudioA = document.getElementById('native-audio-player');
+const nativeAudioB = document.getElementById('native-audio-player-b');
+// Two native elements let the next queued track buffer silently and be promoted
+// at the end of the current one. `nativeAudio` always points at the audible element.
+let nativeAudio = nativeAudioA;
+let preloadedTrackId = null;
+let adoptedTrackId = null;
+let adoptedAt = 0;
+let adoptedSyncRequested = false;
+
+function inactiveNativeAudio() {
+  if (!nativeAudioA || !nativeAudioB) return null;
+  return nativeAudio === nativeAudioA ? nativeAudioB : nativeAudioA;
+}
+
+function desiredNativeSrc(trackId) {
+  return `/api/audio/${encodeURIComponent(trackId)}`;
+}
+
+function resetInactiveNativeAudio() {
+  preloadedTrackId = null;
+  const inactive = inactiveNativeAudio();
+  if (!inactive) return;
+  try {
+    inactive.pause();
+    inactive.removeAttribute('src');
+    inactive.load();
+    inactive.muted = true;
+  } catch (e) {}
+}
+
+function preloadNextNativeTrack(room = currentRoom) {
+  if (!nativeAudioA || !nativeAudioB || activeEngine !== 'audio') return;
+  if (!room?.currentTrack || !room.playback?.isPlaying) return;
+
+  const next = room.queue?.[0];
+  if (!next?.id || next.id === room.currentTrack.id) {
+    if (preloadedTrackId) resetInactiveNativeAudio();
+    return;
+  }
+
+  const inactive = inactiveNativeAudio();
+  if (!inactive) return;
+  const src = desiredNativeSrc(next.id);
+  if (preloadedTrackId === next.id && inactive.src.endsWith(src)) return;
+
+  try {
+    preloadedTrackId = next.id;
+    inactive.preload = 'auto';
+    inactive.muted = true; // stays silent until it is promoted
+    inactive.src = src;
+    inactive.load();
+    audioLog('preload-next', { id: next.id });
+  } catch (e) {
+    preloadedTrackId = null;
+  }
+}
+
+function adoptPreloadedTrack(nextId) {
+  if (!nextId || preloadedTrackId !== nextId) return false;
+  const nextAudio = inactiveNativeAudio();
+  // readyState < 2 means the next stream has no usable audio yet; fall back to the
+  // normal post-broadcast load path instead of swapping to a silent element.
+  if (!nextAudio || nextAudio.readyState < 2) return false;
+
+  try { nextAudio.pause(); } catch (e) {}
+  try { nextAudio.currentTime = 0; } catch (e) {}
+  nextAudio.playbackRate = 1;
+  nextAudio.muted = isMuted;
+  nextAudio.volume = Math.max(0, Math.min(1, currentVolume / 100));
+
+  nativeAudio = nextAudio;
+  adoptedTrackId = nextId;
+  adoptedAt = Date.now();
+  adoptedSyncRequested = false;
+  preloadedTrackId = null;
+
+  const playPromise = nextAudio.play();
+  if (playPromise && typeof playPromise.catch === 'function') {
+    playPromise.catch((err) => {
+      logPlayReject('adopt-preload', err);
+      if (!notPlayingSince) notPlayingSince = Date.now();
+    });
+  }
+  audioLog('adopt-preload', { id: nextId, readyState: nextAudio.readyState });
+  return true;
+}
 const isMobileClient = /mobile|android|iphone|ipad|ipod/i.test(navigator.userAgent);
 let iosVolumeHintShown = false;
 try { iosVolumeHintShown = sessionStorage.getItem('jamlock_ios_volume_hint') === '1'; } catch (e) {}
@@ -593,10 +693,11 @@ if (!Number.isFinite(currentVolume)) currentVolume = 100;
 currentVolume = Math.max(0, Math.min(100, currentVolume));
 let isMuted = localStorage.getItem('jamlock_muted') === '1';
 
-if (nativeAudio) {
-  nativeAudio.volume = Math.max(0, Math.min(1, currentVolume / 100));
-  nativeAudio.muted = isMuted;
-}
+[nativeAudioA, nativeAudioB].forEach((el) => {
+  if (!el) return;
+  el.volume = Math.max(0, Math.min(1, currentVolume / 100));
+  el.muted = isMuted;
+});
 
 if (volumeSlider) {
   volumeSlider.value = currentVolume;
@@ -1509,10 +1610,11 @@ function armNativeStallWatchdog() {
   }, NATIVE_STALL_MS);
 }
 
-// Wire native <audio> events (enables true background play on iOS/Android)
-if (nativeAudio) {
-  nativeAudio.addEventListener('playing', () => {
-    if (activeEngine !== 'audio') return;
+// Wire native <audio> events (enables true background play on iOS/Android).
+// Both elements get the same listeners; inactive/preload events are ignored.
+function wireNativeAudioElement(el) {
+  el.addEventListener('playing', () => {
+    if (el !== nativeAudio || activeEngine !== 'audio') return;
     disarmNativeStallWatchdog();
     showAudioPrompt(false);
     notPlayingSince = 0;
@@ -1529,8 +1631,14 @@ if (nativeAudio) {
     }
   });
 
-  nativeAudio.addEventListener('ended', () => {
-    if (activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
+  el.addEventListener('ended', () => {
+    if (el !== nativeAudio || activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
+
+    // Promote a fully buffered next track before telling the server, so the old
+    // stream's end and the new stream's start do not leave a silent load gap.
+    const nextQueued = currentRoom.queue?.[0];
+    adoptPreloadedTrack(nextQueued?.id);
+
     if (!currentRoom._trackEndNotified) {
       currentRoom._trackEndNotified = true;
       if (currentUser?.isHost) {
@@ -1541,10 +1649,10 @@ if (nativeAudio) {
     }
   });
 
-  // Diagnostics only: log the native audio lifecycle (no behaviour change)
+  // Diagnostics only: log the audible element's lifecycle (no behaviour change)
   ['loadstart', 'loadedmetadata', 'canplay', 'playing', 'waiting', 'stalled', 'pause', 'ended'].forEach((ev) => {
-    nativeAudio.addEventListener(ev, () => {
-      if (activeEngine === 'audio') {
+    el.addEventListener(ev, () => {
+      if (activeEngine === 'audio' && el === nativeAudio) {
         audioLog(`audio:${ev}`, nativeAudioSnapshot());
         if (ev === 'loadedmetadata') recordStopwatchStep('METADATA', `native <audio> duration=${nativeAudio.duration?.toFixed(1)}s`);
         if (ev === 'canplay') recordStopwatchStep('CANPLAY', `native <audio> readyState=${nativeAudio.readyState}`);
@@ -1553,8 +1661,14 @@ if (nativeAudio) {
     });
   });
 
-  // Automatic fallback to YouTube IFrame if direct stream ever errors
-  nativeAudio.addEventListener('error', async () => {
+  // Automatic fallback to YouTube IFrame if the audible direct stream ever errors
+  el.addEventListener('error', async () => {
+    if (el !== nativeAudio) {
+      // A failed background preload is not fatal: the normal post-broadcast load
+      // path will fetch the next track when it actually becomes current.
+      if (preloadedTrackId) preloadedTrackId = null;
+      return;
+    }
     if (activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
     if (nativeAudio.src === SILENT_WAV_DATA_URI) return;
     const mediaErr = nativeAudio.error;
@@ -1609,7 +1723,8 @@ if (nativeAudio) {
 
   // If mobile OS briefly pauses audio during app-switch or tab-switch transition while room is playing, resume
   // Note: iOS/Android often fire `pause` a few ms BEFORE `document.hidden` flips to true during a swipe gesture.
-  nativeAudio.addEventListener('pause', () => {
+  el.addEventListener('pause', () => {
+    if (el !== nativeAudio) return;
     if (activeEngine !== 'audio' || !currentRoom?.currentTrack) return;
     if (nativeAudio.src === SILENT_WAV_DATA_URI) return;
     if (currentRoom.playback?.isPlaying && !nativeAudio.ended && Date.now() > localPauseIntentUntil) {
@@ -1630,6 +1745,9 @@ if (nativeAudio) {
     }
   });
 }
+
+if (nativeAudioA) wireNativeAudioElement(nativeAudioA);
+if (nativeAudioB) wireNativeAudioElement(nativeAudioB);
 
 // Single place that seeks for drift correction. Compensates for seek latency.
 function driftSeek(targetSec, force = false) {
@@ -1760,6 +1878,23 @@ function startSyncEngine() {
   const runSyncTick = () => {
     if (!currentRoom?.currentTrack || isSeeking) return;
 
+    // A gapless handoff already started the queued track locally, but the server
+    // still exposes the old track until its broadcast arrives. Do not seek or pause
+    // the new element using the old timeline during that window.
+    if (adoptedTrackId) {
+      if (currentRoom.currentTrack.id === adoptedTrackId) {
+        adoptedTrackId = null;
+        adoptedAt = 0;
+      } else {
+        if (!adoptedSyncRequested && Date.now() - adoptedAt > 1200) {
+          adoptedSyncRequested = true;
+          socket.emit('sync-request');
+        }
+        updateDebugOverlay();
+        return;
+      }
+    }
+
     const duration = currentRoom.currentTrack.durationSeconds || 1;
     // Server timeline drives the UI, independent of the media engine
     let effectiveTime = calculateServerPosition();
@@ -1871,12 +2006,14 @@ function startSyncEngine() {
       } catch (e) {}
     }
 
-    // Pre-warm the next queued track when within 15 seconds of current track ending
-    if (duration > 0 && effectiveTime >= duration - 15) {
+    // Buffer the next queued track before the current one ends so the native engine
+    // can promote it with no audible loading gap.
+    if (duration > 0 && effectiveTime >= duration - 25) {
       const nextTrack = currentRoom?.queue?.[0];
       if (nextTrack?.id && window.handleWarmup) {
         window.handleWarmup(nextTrack.id);
       }
+      preloadNextNativeTrack(currentRoom);
     }
 
     updateDebugOverlay();
@@ -2005,14 +2142,19 @@ function fallbackToYouTubeTrack(room, reason = 'unspecified') {
   audioLog('fallback-yt', { reason, id: room.currentTrack.id, ytReady });
   activeEngine = 'yt';
   disarmNativeStallWatchdog();
-  if (nativeAudio) {
+  adoptedTrackId = null;
+  adoptedAt = 0;
+  adoptedSyncRequested = false;
+  preloadedTrackId = null;
+  [nativeAudioA, nativeAudioB].forEach((el) => {
+    if (!el) return;
     try {
-      nativeAudio.pause();
-      nativeAudio.playbackRate = 1;
-      nativeAudio.removeAttribute('src');
-      nativeAudio.load();
+      el.pause();
+      el.playbackRate = 1;
+      el.removeAttribute('src');
+      el.load();
     } catch (e) {}
-  }
+  });
   if (reason !== 'cloud-direct-yt' && reason !== 'native-disabled-this-session') {
     if (playerStatusBadge) playerStatusBadge.textContent = 'RETRYING PLAYER…';
     showToast('Switched to the YouTube player for this track', 'info');
@@ -2051,6 +2193,46 @@ function loadCurrentTrack(room, options = {}) {
   const { forceNative = false, reload = false } = options;
   const track = room.currentTrack;
   const trackId = track.id;
+  const adoptedSrc = desiredNativeSrc(trackId);
+
+  // The server confirmed the track we started from the preloaded element. Keep that
+  // stream running instead of re-assigning src (which would restart the download).
+  if (adoptedTrackId === trackId && nativeAudio && nativeAudio.src.endsWith(adoptedSrc)) {
+    adoptedTrackId = null;
+    adoptedAt = 0;
+    adoptedSyncRequested = false;
+    loadedTrackId = trackId;
+    room._trackEndNotified = false;
+    room._skipRequestedForTrack = null;
+
+    activeEngine = 'audio';
+    nativeAudio.muted = isMuted;
+    nativeAudio.volume = Math.max(0, Math.min(1, currentVolume / 100));
+    const livePos = Math.max(0, calculateServerPosition());
+    if (Math.abs((nativeAudio.currentTime || 0) - livePos) > DRIFT_HARD_SEEK_SEC) {
+      try { nativeAudio.currentTime = livePos; } catch (e) {}
+    }
+    if (room.playback?.isPlaying && nativeAudio.paused) {
+      nativeAudio.play().catch((e) => logPlayReject('adopt-loaded', e));
+    } else if (!room.playback?.isPlaying && nativeAudio && !nativeAudio.paused && !nativeAudio.ended) {
+      // A pause landed during the handoff: do not keep the promoted stream running.
+      try { nativeAudio.pause(); } catch (e) {}
+    }
+    if (playerStatusBadge) playerStatusBadge.textContent = 'NOW PLAYING';
+    updateMediaSessionMetadata(track);
+    syncWakeLock(Boolean(room.playback?.isPlaying));
+    audioLog('load-native-adopt-preload', { id: trackId, readyState: nativeAudio.readyState });
+    return;
+  }
+
+  if (adoptedTrackId && adoptedTrackId !== trackId) {
+    // The server chose a different track (auto-suggest, stop, or a manual skip).
+    // Drop the adopted id and let the normal path load the authoritative track.
+    adoptedTrackId = null;
+    adoptedAt = 0;
+    adoptedSyncRequested = false;
+  }
+
   if (loadedTrackId === trackId && !reload) return;
   loadedTrackId = trackId;
   if (room) {
@@ -2294,6 +2476,11 @@ function applyRoomPlayback(playback) {
     } catch (e) {}
   }
   syncWakeLock(Boolean(playback.isPlaying));
+
+  // A gapless handoff has already started the next queued track; playback sync for
+  // the previous track would seek it to the old timeline. Drop the stale update and
+  // let the next room-state/tick apply the authoritative state.
+  if (adoptedTrackId) return;
 
   const serverPos = calculateServerPosition();
 
@@ -3342,13 +3529,18 @@ function renderRoomState(room) {
     }
   } else {
     // Empty state: stop audio on every client
-    if (nativeAudio) {
+    adoptedTrackId = null;
+    adoptedAt = 0;
+    adoptedSyncRequested = false;
+    preloadedTrackId = null;
+    [nativeAudioA, nativeAudioB].forEach((el) => {
+      if (!el) return;
       try {
-        nativeAudio.pause();
-        nativeAudio.removeAttribute('src');
-        nativeAudio.load();
+        el.pause();
+        el.removeAttribute('src');
+        el.load();
       } catch (e) {}
-    }
+    });
     if (ytReady && ytPlayer && typeof ytPlayer.stopVideo === 'function') {
       try { ytPlayer.stopVideo(); } catch (e) {}
     }

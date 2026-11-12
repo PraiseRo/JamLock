@@ -37,7 +37,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/style.css?v=2.3">
+  <link rel="stylesheet" href="/style.css?v=2.4">
   <script src="/socket.io/socket.io.js"></script>
 
   <!-- Pre-paint room view check: ONLY activate when URL specifically points to a room -->
@@ -490,6 +490,7 @@
 
   <!-- PRIMARY NATIVE HTML5 AUDIO ENGINE (Enables mobile background play & lock-screen controls; must not use display:none on iOS/Android) -->
   <audio id="native-audio-player" preload="auto" playsinline style="position: fixed; bottom: 0; left: 0; width: 1px; height: 1px; opacity: 0.01; pointer-events: none; z-index: -99"></audio>
+  <audio id="native-audio-player-b" preload="auto" playsinline style="position: fixed; bottom: 0; left: 0; width: 1px; height: 1px; opacity: 0.01; pointer-events: none; z-index: -99"></audio>
 
   <!-- YOUTUBE AUDIO STREAM HOST (Positioned cleanly offscreen with opacity 1 to avoid browser hidden-iframe throttling/muting) -->
   <div id="yt-player-container" style="position: fixed; top: 0; left: 0; width: 320px; height: 240px; pointer-events: none; opacity: 1; transform: translate3d(-9999px, -9999px, 0); z-index: -10; overflow: hidden">
@@ -674,6 +675,6 @@
   </div>
 
   <script src="https://www.youtube.com/iframe_api"></script>
-  <script type="module" src="/app.js?v=2.3"></script>
+  <script type="module" src="/app.js?v=2.4"></script>
 </body>
 </html>

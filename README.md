@@ -35,7 +35,7 @@ A fast, responsive web application where friends can listen to music together in
 | --- | --- | --- |
 | `PORT` | No | HTTP port (default `3000`). |
 | `ADMIN_SECRET` | For admin | Enables `/admin`, `/api/admin/stats`, and `/api/telemetry`. Without it those routes return `503`. |
-| `IDENTITY_SECRET` | Recommended | HMAC key for the signed `jl_identity` cookie. Set a long random value in production so identities survive restarts. |
+| `IDENTITY_SECRET` | Recommended | HMAC key for the signed `jl_identity` cookie. Set a long random value in production so identities survive restarts. If unset, a generated key is saved to `data/identity-secret`; on hosts with an ephemeral filesystem (for example a PaaS instance without a persistent disk), set this variable explicitly or identities still reset after redeploys. |
 | `APP_ORIGIN` | No | Enables CORS for one explicit origin. Leave unset for the normal same-origin deployment. |
 
 Run the regression suite with:

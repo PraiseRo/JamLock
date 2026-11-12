@@ -1,12 +1,18 @@
 // Fast Multi-Tier Search Engine with Direct YouTubei JSON & LRU In-Memory Cache
 import ytSearch from 'yt-search';
 import { detectGenreFamily, buildGenreDiscoveryQueries, normalizeArtistName, GENRE_FAMILIES } from './genreFamilies.js';
+import { createInstanceHealth } from './instanceHealth.js';
 
 // Global In-Memory Cache: cleanQuery -> { data, timestamp }
 const CACHE = new Map();
 const CACHE_MAX_SIZE = 500;
 const CACHE_TTL_MS = 1000 * 60 * 60; // 1 hour cache
 const INFLIGHT_SEARCHES = new Map();
+
+const YOUTUBEI_TIMEOUT_MS = 6000;
+const YOUTUBE_HTML_TIMEOUT_MS = 7000;
+const YT_SEARCH_TIMEOUT_MS = 5000;
+const HARD_CEILING_MS = 9000;
 
 // Regex patterns to clean bracketed video metadata
 const VIDEO_NOISE_REGEX = /\s*(\(|\[)(official\s*(music\s*)?video|official\s*audio|official\s*lyric(\s*video)?|audio|lyrics?|visualizer|hd|4k|hq|music\s*video|prod\.?\s*by[^\)\]]*|extended|remastered|out\s*now)(\)|\])/gi;
@@ -205,8 +211,67 @@ function deduplicateAudioTracks(tracks, query = '', limit = 8) {
     .slice(0, limit);
 }
 
+// Convert a YouTube videoRenderer payload into the track shape used by the UI.
+function mapVideoRenderer(v) {
+  if (!v?.videoId) return null;
+  const title = v.title?.runs?.map((r) => r.text).join('') || 'Untitled Track';
+  const artist = v.ownerText?.runs?.map((r) => r.text).join('') || 'Unknown Artist';
+  const duration = v.lengthText?.simpleText || '0:00';
+  const durationParts = duration.split(':').map(Number);
+  let durationSeconds = 0;
+  if (durationParts.length === 2) durationSeconds = durationParts[0] * 60 + durationParts[1];
+  if (durationParts.length === 3) durationSeconds = durationParts[0] * 3600 + durationParts[1] * 60 + durationParts[2];
+
+  return {
+    id: v.videoId,
+    title,
+    artist,
+    duration,
+    durationSeconds,
+    thumbnail: v.thumbnail?.thumbnails?.pop()?.url || `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+    url: `https://www.youtube.com/watch?v=${v.videoId}`
+  };
+}
+
+// Walk the YouTube response tree iteratively, preserving result order.
+function collectVideoRenderers(root, limit = 12) {
+  const out = [];
+  const stack = [root];
+  while (stack.length && out.length < limit) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (let i = node.length - 1; i >= 0; i--) stack.push(node[i]);
+      continue;
+    }
+    if (node.videoRenderer) out.push(node.videoRenderer);
+    const keys = Object.keys(node);
+    for (let i = keys.length - 1; i >= 0; i--) {
+      if (keys[i] !== 'videoRenderer') stack.push(node[keys[i]]);
+    }
+  }
+  return out.slice(0, limit);
+}
+
+// Race a request against a hard deadline. AbortController alone cannot stop a
+// response body that has already sent its headers, so the race is the real bound.
+async function withDeadline(work, timeoutMs, label, controller) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      try { controller.abort(); } catch (e) {}
+      reject(new Error(`${label} timeout ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Direct YouTubei JSON Search (Much faster than DOM HTML scraping)
-async function searchYouTubei(query, limit = 12) {
+async function searchYouTubei(query, limit = 12, timeoutMs = YOUTUBEI_TIMEOUT_MS) {
   const url = 'https://www.youtube.com/youtubei/v1/search?prettyPrint=false';
   const body = {
     context: {
@@ -222,9 +287,7 @@ async function searchYouTubei(query, limit = 12) {
   };
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 1500);
-
-  try {
+  const work = (async () => {
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -234,51 +297,66 @@ async function searchYouTubei(query, limit = 12) {
       body: JSON.stringify(body),
       signal: controller.signal
     });
-    clearTimeout(timeoutId);
-
-    if (!res.ok) return null;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
-
-    const sections = json.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents || [];
-    let items = [];
-
-    for (const sec of sections) {
-      const contents = sec.itemSectionRenderer?.contents || [];
-      for (const item of contents) {
-        if (item.videoRenderer) {
-          const v = item.videoRenderer;
-          const videoId = v.videoId;
-          if (!videoId) continue;
-
-          const title = v.title?.runs?.map((r) => r.text).join('') || 'Untitled Track';
-          const artist = v.ownerText?.runs?.map((r) => r.text).join('') || 'Unknown Artist';
-          const duration = v.lengthText?.simpleText || '0:00';
-          const durationParts = duration.split(':').map(Number);
-          let durationSeconds = 0;
-          if (durationParts.length === 2) durationSeconds = durationParts[0] * 60 + durationParts[1];
-          if (durationParts.length === 3) durationSeconds = durationParts[0] * 3600 + durationParts[1] * 60 + durationParts[2];
-
-          const thumbnail = v.thumbnail?.thumbnails?.pop()?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
-
-          items.push({
-            id: videoId,
-            title,
-            artist,
-            duration,
-            durationSeconds,
-            thumbnail,
-            url: `https://www.youtube.com/watch?v=${videoId}`
-          });
-
-          if (items.length >= limit) break;
-        }
-      }
-      if (items.length >= limit) break;
-    }
-
+    const items = collectVideoRenderers(json, limit).map(mapVideoRenderer).filter(Boolean);
     return items.length > 0 ? items : null;
+  })();
+
+  try {
+    return await withDeadline(work, timeoutMs, 'YouTubei', controller);
   } catch (err) {
-    clearTimeout(timeoutId);
+    if (err?.name !== 'AbortError') {
+      console.warn(`[SEARCH-SOURCE] YouTubei failed: ${err?.message || err}`);
+    }
+    return null;
+  }
+}
+
+// Direct YouTube results HTML is a second JSON source. It is slower than youtubei,
+// but deploy networks that block the JSON endpoint can still parse ytInitialData.
+async function searchYouTubeHtml(query, limit = 12, timeoutMs = YOUTUBE_HTML_TIMEOUT_MS) {
+  const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=EgIQAQ%253D%253D`;
+  const controller = new AbortController();
+  const work = (async () => {
+    const res = await fetch(url, {
+      headers: {
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'accept-language': 'en-US,en;q=0.9'
+      },
+      signal: controller.signal
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const html = await res.text();
+
+    const markers = ['var ytInitialData = ', 'window["ytInitialData"] = '];
+    let start = -1;
+    let markerLength = 0;
+    for (const marker of markers) {
+      const index = html.indexOf(marker);
+      if (index !== -1) {
+        start = index;
+        markerLength = marker.length;
+        break;
+      }
+    }
+    if (start === -1) throw new Error('ytInitialData marker missing');
+
+    let end = html.indexOf(';</script>', start + markerLength);
+    if (end === -1) end = html.indexOf('</script>', start + markerLength);
+    if (end === -1) throw new Error('ytInitialData end marker missing');
+
+    const data = JSON.parse(html.slice(start + markerLength, end).trim().replace(/;$/, ''));
+    const items = collectVideoRenderers(data, limit).map(mapVideoRenderer).filter(Boolean);
+    return items.length > 0 ? items : null;
+  })();
+
+  try {
+    return await withDeadline(work, timeoutMs, 'YouTube-HTML', controller);
+  } catch (err) {
+    if (err?.name !== 'AbortError') {
+      console.warn(`[SEARCH-SOURCE] YouTube-HTML failed: ${err?.message || err}`);
+    }
     return null;
   }
 }
@@ -292,9 +370,12 @@ const PIPED_SEARCH_INSTANCES = [
   'https://api.piped.private.coffee'
 ];
 
+// Public search hosts die often; skip hosts that failed twice in a row.
+const pipedSearchHealth = createInstanceHealth();
+
 // Secondary Fast JSON Search via Piped (fast 400ms - 1200ms structured responses)
 async function searchPiped(query, limit = 16) {
-  const attempts = PIPED_SEARCH_INSTANCES.map(async (baseUrl) => {
+  const attempts = pipedSearchHealth.available(PIPED_SEARCH_INSTANCES).map(async (baseUrl) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 2400);
     try {
@@ -307,6 +388,7 @@ async function searchPiped(query, limit = 16) {
       const items = Array.isArray(data?.items) ? data.items : [];
       const videos = items.filter((it) => it.type === 'stream' || it.url?.includes('watch?v='));
       if (videos.length === 0) throw new Error('No items');
+      pipedSearchHealth.recordSuccess(baseUrl);
       return videos.map((v) => {
         const videoId = v.url ? v.url.replace('/watch?v=', '').split('&')[0] : (v.id || '');
         const durationSec = Number(v.duration) || 0;
@@ -322,6 +404,9 @@ async function searchPiped(query, limit = 16) {
           url: `https://www.youtube.com/watch?v=${videoId}`
         };
       }).slice(0, limit);
+    } catch (err) {
+      pipedSearchHealth.recordFailure(baseUrl);
+      throw err;
     } finally {
       clearTimeout(timer);
     }
@@ -334,12 +419,13 @@ async function searchPiped(query, limit = 16) {
   }
 }
 
-// Fallback search with ytSearch, strictly bounded by a 3500ms timeout
+// Fallback search with ytSearch, strictly bounded so a hung HTML scrape cannot pin the race.
 async function searchFallback(query, limit = 12) {
+  let timer;
   try {
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('yt-search hard timeout 3500ms')), 3500)
-    );
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('yt-search hard timeout')), YT_SEARCH_TIMEOUT_MS);
+    });
     const results = await Promise.race([ytSearch({ query }), timeoutPromise]);
     return (results.videos || []).slice(0, limit).map((v) => ({
       id: v.videoId,
@@ -352,24 +438,26 @@ async function searchFallback(query, limit = 12) {
     }));
   } catch (err) {
     return [];
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-// Multi-tier concurrent search race with an absolute 4000ms hard ceiling
+// Multi-tier concurrent search race with an absolute hard ceiling.
 async function fetchFastResults(cleanQuery, limit = 16) {
   const startT = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
-    let pending = 3;
+    let pending = 4;
 
-    // Hard ceiling timer: if nothing won within 3800ms, abort and return empty rather than hanging 25s
+    // Hard ceiling: if nothing won, return empty rather than hanging the request.
     const hardCeiling = setTimeout(() => {
       if (!resolved) {
         resolved = true;
         console.warn(`[SEARCH-SOURCE] "${cleanQuery}" hard ceiling reached at ${Date.now() - startT}ms`);
         resolve([]);
       }
-    }, 3800);
+    }, HARD_CEILING_MS);
 
     const handleResults = (sourceName, items) => {
       if (resolved) return;
@@ -389,23 +477,32 @@ async function fetchFastResults(cleanQuery, limit = 16) {
       }
     };
 
-    // Branch 1: Direct YouTubei JSON (target: 300ms - 900ms)
+    // Branch 1: Direct YouTubei JSON (target: 1s - 3s on slow networks)
     searchYouTubei(cleanQuery, limit)
       .then((res) => handleResults('YouTubei', res))
       .catch(() => handleResults('YouTubei', null));
 
-    // Branch 2: Fast Piped JSON API (target: 400ms - 1200ms)
+    // Branch 2: Fast Piped JSON API (often fast, but public hosts are unreliable)
     searchPiped(cleanQuery, limit)
       .then((res) => handleResults('Piped-JSON', res))
       .catch(() => handleResults('Piped-JSON', null));
 
-    // Branch 3: yt-search HTML scraper with 3500ms timeout (starts after 400ms if fast JSON hasn't resolved)
+    // Branch 3: Direct results HTML. Staggered so fast JSON providers win without
+    // paying for a 1.3MB page on every search.
+    setTimeout(() => {
+      if (resolved) return;
+      searchYouTubeHtml(cleanQuery, limit)
+        .then((res) => handleResults('YouTube-HTML', res))
+        .catch(() => handleResults('YouTube-HTML', null));
+    }, 2500);
+
+    // Branch 4: yt-search HTML scraper, also staggered.
     setTimeout(() => {
       if (resolved) return;
       searchFallback(cleanQuery, limit)
         .then((res) => handleResults('ytSearch-Fallback', res))
         .catch(() => handleResults('ytSearch-Fallback', null));
-    }, 400);
+    }, 700);
   });
 }
 
@@ -694,3 +791,12 @@ export async function getMultipleRecommendations(currentTrack, count = 3, existi
 
   return selectedTracks;
 }
+
+// Internal helpers exposed for regression tests.
+export const __test = {
+  mapVideoRenderer,
+  collectVideoRenderers,
+  searchYouTubei,
+  searchYouTubeHtml,
+  searchPiped
+};

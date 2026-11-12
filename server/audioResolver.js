@@ -5,6 +5,7 @@
 
 import { Ytdl, chooseFormat } from '@distube/ytdl-core';
 import { Readable, pipeline } from 'stream';
+import { createInstanceHealth } from './instanceHealth.js';
 
 const ytdl = new Ytdl();
 
@@ -39,52 +40,7 @@ const INVIDIOUS_INSTANCES = [
 // Dead public Piped/Invidious instances were being retried on every extraction,
 // wasting the whole fallback budget. Track consecutive failures and cool each host
 // down for 2 minutes after 2 failed attempts.
-const INSTANCE_COOLDOWN_MS = 2 * 60 * 1000;
-const INSTANCE_FAILURE_THRESHOLD = 2;
-const INSTANCE_HEALTH = new Map();
-
-function instanceKey(base) {
-  try { return new URL(base).hostname; } catch (e) { return base; }
-}
-
-function availableInstances(instances) {
-  const healthy = instances.filter((base) => {
-    const entry = INSTANCE_HEALTH.get(instanceKey(base));
-    return !entry?.cooldownUntil || entry.cooldownUntil <= Date.now();
-  });
-  if (healthy.length) return healthy;
-
-  // Everything is cooling down: probe only the instance that is closest to recovery,
-  // so we notice it coming back without retrying every dead host.
-  let soonest = null;
-  let soonestAt = Infinity;
-  for (const base of instances) {
-    const entry = INSTANCE_HEALTH.get(instanceKey(base));
-    if (entry?.cooldownUntil && entry.cooldownUntil < soonestAt) {
-      soonestAt = entry.cooldownUntil;
-      soonest = base;
-    }
-  }
-  return soonest ? [soonest] : instances;
-}
-
-function markInstanceFailure(base) {
-  const key = instanceKey(base);
-  const entry = INSTANCE_HEALTH.get(key) || { failures: 0, cooldownUntil: 0 };
-  entry.failures += 1;
-  if (entry.failures >= INSTANCE_FAILURE_THRESHOLD) {
-    entry.cooldownUntil = Date.now() + INSTANCE_COOLDOWN_MS;
-    entry.failures = 0;
-  }
-  if (INSTANCE_HEALTH.size >= 100) {
-    INSTANCE_HEALTH.delete(INSTANCE_HEALTH.keys().next().value);
-  }
-  INSTANCE_HEALTH.set(key, entry);
-}
-
-function markInstanceSuccess(base) {
-  INSTANCE_HEALTH.delete(instanceKey(base));
-}
+const instanceHealth = createInstanceHealth();
 
 // Googlevideo URLs carry an `expire` epoch. Stop serving a cached URL shortly before
 // it expires instead of trusting the fixed 20-minute TTL.
@@ -144,7 +100,7 @@ async function extractViaYtdl(videoId) {
 }
 
 async function extractViaPiped(videoId) {
-  const attempts = availableInstances(PIPED_INSTANCES).map(async (base) => {
+  const attempts = instanceHealth.available(PIPED_INSTANCES).map(async (base) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FALLBACK_API_TIMEOUT_MS);
     try {
@@ -166,7 +122,7 @@ async function extractViaPiped(videoId) {
         .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
       const chosen = m4a || anyAudio;
       if (!chosen?.url) throw new Error(`Piped ${base} no audioStreams`);
-      markInstanceSuccess(base);
+      instanceHealth.recordSuccess(base);
       return {
         url: chosen.url,
         mimeType: (chosen.mimeType || 'audio/mp4').split(';')[0].trim(),
@@ -175,7 +131,7 @@ async function extractViaPiped(videoId) {
         provider: `piped:${new URL(base).hostname}`
       };
     } catch (err) {
-      markInstanceFailure(base);
+      instanceHealth.recordFailure(base);
       throw err;
     } finally {
       clearTimeout(timer);
@@ -186,7 +142,7 @@ async function extractViaPiped(videoId) {
 }
 
 async function extractViaInvidious(videoId) {
-  const attempts = availableInstances(INVIDIOUS_INSTANCES).map(async (base) => {
+  const attempts = instanceHealth.available(INVIDIOUS_INSTANCES).map(async (base) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FALLBACK_API_TIMEOUT_MS);
     try {
@@ -208,7 +164,7 @@ async function extractViaInvidious(videoId) {
         .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))[0];
       const chosen = m4a || anyAudio;
       if (!chosen?.url) throw new Error(`Invidious ${base} no adaptiveFormats`);
-      markInstanceSuccess(base);
+      instanceHealth.recordSuccess(base);
 
       // Use Invidious instance's local proxy URL so datacenter IP blocks on googlevideo are bypassed
       const proxiedUrl = `${base}/latest_version?id=${encodeURIComponent(videoId)}&itag=${encodeURIComponent(chosen.itag || 140)}&local=true`;
@@ -221,7 +177,7 @@ async function extractViaInvidious(videoId) {
         provider: `invidious:${new URL(base).hostname}`
       };
     } catch (err) {
-      markInstanceFailure(base);
+      instanceHealth.recordFailure(base);
       throw err;
     } finally {
       clearTimeout(timer);
@@ -306,13 +262,18 @@ export async function getYoutubeAudioFormat(videoId, options = {}) {
   return promise;
 }
 
-// Proxy audio stream with full HTTP 206 Byte-Range support for iOS Safari & Android lock-screen seeking
-export async function streamAudioToClient(req, res) {
+// Proxy audio stream with full HTTP 206 Byte-Range support for iOS Safari & Android lock-screen seeking.
+// `deps` is a test seam: production callers use the real resolver/fetch/10s timeout.
+export async function handleAudioProxy(req, res, deps = {}) {
+  const getFormat = deps.getFormat || getYoutubeAudioFormat;
+  const fetchImpl = deps.fetchImpl || fetch;
+  const upstreamTimeoutMs = Number(deps.upstreamTimeoutMs) > 0 ? deps.upstreamTimeoutMs : UPSTREAM_TIMEOUT_MS;
+  const logger = deps.logger || console;
   const videoId = String(req.params.videoId || '').trim();
-  let format = await getYoutubeAudioFormat(videoId);
+  let format = await getFormat(videoId);
 
   if (!format || !format.url) {
-    console.warn(`[audio] stream 404 id=${videoId}: no format (extraction failed)`);
+    logger.warn(`[audio] stream 404 id=${videoId}: no format (extraction failed)`);
     res.status(404).json({ error: 'Audio stream unavailable', reason: 'extract-failed' });
     return;
   }
@@ -337,12 +298,13 @@ export async function streamAudioToClient(req, res) {
 
   let timedOut = false;
   const fetchUpstream = async (url) => {
+    timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       try { abortController.abort(); } catch (e) {}
-    }, UPSTREAM_TIMEOUT_MS);
+    }, upstreamTimeoutMs);
     try {
-      return await fetch(url, { headers: upstreamHeaders, signal: abortController.signal, redirect: 'follow' });
+      return await fetchImpl(url, { headers: upstreamHeaders, signal: abortController.signal, redirect: 'follow' });
     } finally {
       clearTimeout(timer);
     }
@@ -353,9 +315,10 @@ export async function streamAudioToClient(req, res) {
 
     // If ytdl googlevideo URL is IP-blocked (403/410) or upstream failed, immediately switch to Tier 2/3 fallback proxy
     if (!upstreamRes.ok && upstreamRes.status !== 206) {
-      console.warn(`[audio] upstream ${upstreamRes.status} from ${format.provider} id=${videoId}: switching to fallback stream`);
+      logger.warn(`[audio] upstream ${upstreamRes.status} from ${format.provider} id=${videoId}: switching to fallback stream`);
+      try { upstreamRes.body?.cancel(); } catch (e) {}
       FORMAT_CACHE.delete(videoId);
-      const fallbackFormat = await getYoutubeAudioFormat(videoId, {
+      const fallbackFormat = await getFormat(videoId, {
         skipYtdl: format.provider === 'ytdl',
         forceRefresh: true
       });
@@ -366,7 +329,7 @@ export async function streamAudioToClient(req, res) {
     }
 
     if (!upstreamRes.ok && upstreamRes.status !== 206) {
-      console.warn(`[audio] stream 502 id=${videoId}: upstream status ${upstreamRes.status}`);
+      logger.warn(`[audio] stream 502 id=${videoId}: upstream status ${upstreamRes.status}`);
       const reason = (upstreamRes.status === 403 || upstreamRes.status === 410) ? 'upstream-403' : 'upstream-error';
       res.status(502).json({ error: 'Audio upstream failed', reason });
       return;
@@ -393,18 +356,18 @@ export async function streamAudioToClient(req, res) {
     // socket errors; pipe() alone would leave it open.
     pipeline(nodeStream, res, (err) => {
       if (err && err.code !== 'ERR_STREAM_PREMATURE_CLOSE' && !abortController.signal.aborted) {
-        console.warn(`[audio] stream pipeline ended id=${videoId}: ${err?.message || err}`);
+        logger.warn(`[audio] stream pipeline ended id=${videoId}: ${err?.message || err}`);
       }
     });
   } catch (e) {
     if (timedOut && !res.headersSent) {
-      console.warn(`[audio] upstream TIMEOUT id=${videoId}: no response within ${UPSTREAM_TIMEOUT_MS}ms`);
+      logger.warn(`[audio] upstream TIMEOUT id=${videoId}: no response within ${upstreamTimeoutMs}ms`);
       FORMAT_CACHE.delete(videoId);
       res.status(504).json({ error: 'Audio upstream timed out', reason: 'timeout' });
       return;
     }
     if (e?.name !== 'AbortError') {
-      console.warn(`[audio] stream error id=${videoId}: ${e?.message || e}`);
+      logger.warn(`[audio] stream error id=${videoId}: ${e?.message || e}`);
     }
     if (!res.headersSent) {
       res.status(500).json({ error: 'Audio stream error', reason: 'server-error' });
@@ -412,6 +375,10 @@ export async function streamAudioToClient(req, res) {
       try { res.end(); } catch (err) {}
     }
   }
+}
+
+export async function streamAudioToClient(req, res) {
+  return handleAudioProxy(req, res);
 }
 
 export async function resolveAudioStream({ videoId }) {
@@ -425,3 +392,6 @@ export async function resolveAudioStream({ videoId }) {
   }
   return { mode: 'iframe', url: null, source: 'yt-iframe' };
 }
+
+// Internal helpers exposed for regression tests.
+export const __test = { cacheExpiryFor };
